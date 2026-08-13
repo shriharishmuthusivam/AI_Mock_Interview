@@ -7,7 +7,7 @@ import GlassCard from "../components/GlassCard";
 import GradientButton from "../components/GradientButton";
 import TextField from "../components/TextField";
 import { useToast } from "../components/Toast";
-import { setAuth } from "../api";
+import { setAuth, setStudentClass } from "../api";
 import api from "../api";
 import { colors, fonts, gradients } from "../styles/theme";
 
@@ -36,6 +36,7 @@ function Login({ setIsLoggedIn, setStudent }) {
       toast.success(response.data.message);
 
       setAuth("student", response.data.token, response.data.username);
+      setStudentClass(response.data.className || "");
 
       setStudent(response.data.username);
       setIsLoggedIn(true);
@@ -86,9 +87,9 @@ function Login({ setIsLoggedIn, setStudent }) {
           </p>
 
           <TextField
-            label="Username"
-            placeholder="Enter username"
-            icon="👤"
+            label="College DNo"
+            placeholder="Enter your college DNo"
+            icon="🪪"
             value={username}
             onChange={setUsername}
           />

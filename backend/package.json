@@ -21,8 +21,10 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^9.6.2",
+    "multer": "^2.2.0",
     "nodemailer": "^7.0.5",
-    "pdfkit": "^0.17.1"
+    "pdfkit": "^0.17.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

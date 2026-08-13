@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import AnimatedBackground from "../components/AnimatedBackground";
 import Confetti from "../components/Confetti";
@@ -8,6 +9,8 @@ import { colors, fonts, radius, gradients } from "../styles/theme";
 import { motion } from "framer-motion";
 
 function ResultScreen({ totalScore, maxScore, onRestart, onLogout }) {
+  const navigate = useNavigate();
+
   const [celebrate] = useState(totalScore >= 40);
 
   let performance = "";
@@ -46,6 +49,16 @@ function ResultScreen({ totalScore, maxScore, onRestart, onLogout }) {
       {celebrate && <Confetti />}
 
       <div style={styles.container}>
+        <motion.div
+          initial={{ opacity: 0, y: -12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.4 }}
+          style={styles.backLink}
+          onClick={() => navigate("/")}
+        >
+          ← Back
+        </motion.div>
+
         <motion.div
           initial={{ opacity: 0, scale: 0.92, y: 20 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -144,6 +157,18 @@ const styles = {
     alignItems: "center",
     padding: "20px",
     fontFamily: fonts.family,
+    position: "relative",
+  },
+
+  backLink: {
+    position: "absolute",
+    top: 24,
+    left: 24,
+    color: colors.textMuted,
+    cursor: "pointer",
+    fontSize: 15,
+    fontWeight: 600,
+    transition: "color 0.2s",
   },
 
   card: {

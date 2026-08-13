@@ -21,6 +21,11 @@ const interviewSchema = new mongoose.Schema({
     required: true,
   },
 
+  className: {
+    type: String,
+    default: "",
+  },
+
   question: {
     type: String,
   },

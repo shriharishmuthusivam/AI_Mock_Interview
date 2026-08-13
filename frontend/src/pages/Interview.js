@@ -4,35 +4,32 @@ import React, {
   useState,
 } from "react";
 import { AnimatePresence, motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 
 import useProctoring from "../hooks/useProctoring";
 import AnimatedBackground from "../components/AnimatedBackground";
 import TypingIndicator from "../components/TypingIndicator";
-import api from "../api";
+import GradientButton from "../components/GradientButton";
+import { useToast } from "../components/Toast";
+import api, { getStudentClass } from "../api";
 import { colors, fonts, gradients, radius, shadows } from "../styles/theme";
-
-const SUBJECTS = [
-  { name: "DBMS", icon: "🗄", tag: "Databases" },
-  { name: "OOPs", icon: "🧱", tag: "Object Oriented" },
-  { name: "DSA", icon: "🧠", tag: "Algorithms" },
-  { name: "Operating Systems", icon: "⚙️", tag: "OS Concepts" },
-  { name: "Computer Networks", icon: "🌐", tag: "Networking" },
-];
 
 function Interview({
   student,
   setShowResult,
   setTotalScore,
+  setMaxScore,
+  onLogout,
 }) {
-  const [message, setMessage] = useState("");
+  const navigate = useNavigate();
 
-  const [selectedSubject, setSelectedSubject] =
-    useState("");
+  const toast = useToast();
+
+  const [message, setMessage] = useState("");
 
   const [chat, setChat] = useState([]);
 
-  const [questionCount, setQuestionCount] =
-    useState(0);
+  const [questionCount, setQuestionCount] = useState(0);
 
   const [interviewEnded, setInterviewEnded] =
     useState(false);
@@ -42,7 +39,24 @@ function Interview({
 
   const [score, setScore] = useState(0);
 
-  const MAX_QUESTIONS = 10;
+  const [loading, setLoading] = useState(true);
+
+  const [config, setConfig] = useState({
+    configured: false,
+    questionCount: 0,
+  });
+
+  const [className, setClassName] = useState("");
+
+  const [started, setStarted] = useState(false);
+
+  const [startError, setStartError] = useState("");
+
+  const [liveCode, setLiveCode] = useState("");
+
+  const [joiningLive, setJoiningLive] = useState(false);
+
+  const [liveJoinError, setLiveJoinError] = useState("");
 
   const totalMarksRef = useRef(0);
 
@@ -81,10 +95,43 @@ function Interview({
       sendReport();
 
       setTimeout(() => {
+        setMaxScore(config.questionCount * 10);
+
         setShowResult(true);
       }, 2000);
     },
   });
+
+  // Load the student's class interview config
+  useEffect(() => {
+    const cls = getStudentClass();
+
+    if (!cls) {
+      setLoading(false);
+      setConfig({ configured: false, questionCount: 0 });
+      return;
+    }
+
+    setClassName(cls);
+
+    const load = async () => {
+      try {
+        const response = await api.get(
+          `/api/syllabus/${encodeURIComponent(cls)}`,
+          { authRole: "student" }
+        );
+
+        setConfig(response.data);
+      } catch (error) {
+        console.error(error);
+        setConfig({ configured: false, questionCount: 0 });
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    load();
+  }, []);
 
   // Auto-scroll chat to the newest message
   useEffect(() => {
@@ -132,22 +179,18 @@ function Interview({
     }
   };
 
-  // Start Interview
-  const beginInterview = (subject) => {
+  // Start Interview (get the AI to generate the first question)
+  const beginInterview = async () => {
     if (startedRef.current) return;
 
     startedRef.current = true;
+
+    setStartError("");
 
     sessionIdRef.current =
       typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
         : `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    currentQuestionRef.current = `Tell me what you know about ${subject}.`;
-
-    setSelectedSubject(subject);
-
-    setQuestionCount(1);
 
     setInterviewEnded(false);
 
@@ -158,11 +201,54 @@ function Interview({
     setChat([
       {
         sender: "ai",
-        text: `Welcome to the ${subject} Mock Interview.\n\nLet's begin.\n\nTell me what you know about ${subject}.`,
+        text: `Welcome to the ${className} Mock Interview.\n\nAnswer ${config.questionCount} questions based on your class syllabus. Let's begin.`,
       },
     ]);
 
+    setStarted(true);
+
     startProctoring();
+
+    try {
+      const response = await api.post(
+        "/api/chat",
+        {
+          message: "Begin the interview.",
+          sessionId: sessionIdRef.current,
+          transcript: [],
+          start: true,
+          questionCount: config.questionCount,
+          questionIndex: 0,
+        },
+        { authRole: "student" }
+      );
+
+      const firstQuestion = response.data.reply;
+
+      currentQuestionRef.current = firstQuestion;
+
+      setQuestionCount(1);
+
+      setChat([
+        {
+          sender: "ai",
+          text: `Welcome to the ${className} Mock Interview.\n\nAnswer ${config.questionCount} questions based on your class syllabus.\n\nFirst question:\n\n${firstQuestion}`,
+        },
+      ]);
+    } catch (error) {
+      console.error(error);
+
+      startedRef.current = false;
+
+      setStarted(false);
+
+      setStartError(
+        error.response?.data?.message ||
+          "Could not start the interview. Please check that the backend and AI service are reachable, then try again."
+      );
+
+      stopProctoring();
+    }
   };
 
   // Send Message
@@ -172,17 +258,6 @@ function Interview({
     if (interviewEnded) return;
 
     if (isSending) return;
-
-    if (!selectedSubject) {
-      const notice = {
-        sender: "ai",
-        text: "Please select a subject to start the interview.",
-      };
-
-      setChat((prev) => [...prev, notice]);
-
-      return;
-    }
 
     const userMessage = {
       sender: "user",
@@ -198,11 +273,12 @@ function Interview({
         "/api/chat",
         {
           message,
-          subject: selectedSubject,
           sessionId: sessionIdRef.current,
           question: currentQuestionRef.current,
           violationCount,
           transcript: buildTranscript(),
+          questionCount: config.questionCount,
+          questionIndex: questionCount,
         },
         { authRole: "student" }
       );
@@ -214,8 +290,8 @@ function Interview({
       // Remember the next question the AI asks for the report
       parseNextQuestion(aiReply);
 
-      // Remove next question after final question
-      if (nextCount >= MAX_QUESTIONS) {
+      // Remove next question only after the LAST question has been answered
+      if (nextCount > config.questionCount) {
         aiReply = aiReply.replace(/Next Question:.*/is, "");
       }
 
@@ -232,8 +308,8 @@ function Interview({
 
       setQuestionCount(nextCount);
 
-      // Final Question
-      if (nextCount >= MAX_QUESTIONS) {
+      // Interview ends after the last configured question is answered
+      if (nextCount > config.questionCount) {
         setInterviewEnded(true);
 
         stopProctoring();
@@ -242,6 +318,8 @@ function Interview({
 
         setTimeout(() => {
           setTotalScore(totalMarksRef.current);
+
+          setMaxScore(config.questionCount * 10);
 
           setShowResult(true);
         }, 2000);
@@ -260,9 +338,41 @@ function Interview({
     } catch (error) {
       console.error(error);
 
+      const status = error.response?.status;
+
+      // If the FINAL answer hits a rate limit, still finish the interview
+      // so the student gets their results instead of being stuck.
+      if (status === 429 && questionCount >= config.questionCount) {
+        setInterviewEnded(true);
+
+        stopProctoring();
+
+        sendReport();
+
+        setChat((prev) => [
+          ...prev,
+          {
+            sender: "ai",
+            text: "The final answer could not be processed because the AI service was temporarily rate-limited, but your results are ready.",
+          },
+        ]);
+
+        setTimeout(() => {
+          setTotalScore(totalMarksRef.current);
+
+          setMaxScore(config.questionCount * 10);
+
+          setShowResult(true);
+        }, 2000);
+
+        return;
+      }
+
       const errorMessage = {
         sender: "ai",
-        text: "Backend not connected yet.",
+        text:
+          error.response?.data?.message ||
+          "Backend not connected yet.",
       };
 
       setChat((prev) => [...prev, errorMessage]);
@@ -274,11 +384,126 @@ function Interview({
   };
 
   const progress =
-    Math.min(questionCount / MAX_QUESTIONS, 1) * 100;
+    Math.min(questionCount / (config.questionCount || 1), 1) * 100;
+
+  const joinLiveInterview = async () => {
+    const code = liveCode.trim();
+
+    if (!code) {
+      setLiveJoinError("Please enter the room code from your interviewer.");
+      return;
+    }
+
+    setJoiningLive(true);
+    setLiveJoinError("");
+
+    try {
+      const response = await api.post(
+        "/api/live/join",
+        { code },
+        { authRole: "student" }
+      );
+
+      navigate(`/live/${response.data.code}`);
+    } catch (error) {
+      const messageText =
+        error.response?.data?.message ||
+        "Could not join the live session. Please check the code.";
+
+      setLiveJoinError(messageText);
+
+      toast.error(messageText);
+    } finally {
+      setJoiningLive(false);
+    }
+  };
+
+  const renderBody = () => {
+    if (loading) {
+      return (
+        <div style={styles.centerNote}>
+          <TypingIndicator />
+        </div>
+      );
+    }
+
+    if (!className) {
+      return (
+        <div style={styles.startCard}>
+          <span style={styles.bigIcon}>🪪</span>
+
+          <h2 style={styles.startTitle}>No class assigned</h2>
+
+          <p style={styles.startText}>
+            Your interviewer has not assigned a class to your account yet.
+            Please contact them.
+          </p>
+        </div>
+      );
+    }
+
+    if (!config.configured) {
+      return (
+        <div style={styles.startCard}>
+          <span style={styles.bigIcon}>📚</span>
+
+          <h2 style={styles.startTitle}>Interview not set up yet</h2>
+
+          <p style={styles.startText}>
+            Your interviewer hasn't uploaded the syllabus for{" "}
+            <b>{className}</b> yet. Please check back later.
+          </p>
+        </div>
+      );
+    }
+
+    if (!started) {
+      return (
+        <div style={styles.startCard}>
+          <span style={styles.bigIcon}>🎓</span>
+
+          <h2 style={styles.startTitle}>{className}</h2>
+
+          <p style={styles.startText}>
+            This interview will ask you{" "}
+            <b>{config.questionCount} questions</b> generated from your class
+            syllabus. Proctoring will monitor the session.
+          </p>
+
+          {startError && (
+            <p style={styles.startError}>{startError}</p>
+          )}
+
+          <GradientButton
+            onClick={beginInterview}
+            style={{ marginTop: 8 }}
+          >
+            Start Interview
+          </GradientButton>
+        </div>
+      );
+    }
+
+    return null;
+  };
 
   return (
     <AnimatedBackground>
       <div style={styles.container}>
+        {/* Top nav */}
+        <div style={styles.navRow}>
+          <button
+            onClick={() => navigate(-1)}
+            style={styles.navBack}
+          >
+            ← Back
+          </button>
+
+          <button onClick={onLogout} style={styles.navLogout}>
+            Logout
+          </button>
+        </div>
+
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: -16 }}
@@ -300,18 +525,20 @@ function Interview({
           </h1>
 
           <p style={styles.subtitle}>
-            {selectedSubject
-              ? `Subject: ${selectedSubject}`
-              : "Select a subject to begin"}
+            {started
+              ? `Class: ${className}`
+              : "Prepare for your class interview"}
           </p>
         </motion.div>
 
         {/* Progress + Score */}
-        {selectedSubject && !interviewEnded && (
+        {started && !interviewEnded && (
           <div style={styles.progressRow}>
             <div style={styles.progressWrap}>
               <div style={styles.progressLabel}>
-                Question {Math.min(questionCount, MAX_QUESTIONS)}/{MAX_QUESTIONS}
+                Question{" "}
+                {Math.min(questionCount, config.questionCount)}/
+                {config.questionCount}
               </div>
 
               <div style={styles.progressTrack}>
@@ -345,30 +572,59 @@ function Interview({
           )}
         </AnimatePresence>
 
-        {/* Subject Picker */}
-        {!selectedSubject && (
-          <div style={styles.subjectContainer}>
-            {SUBJECTS.map((s, i) => (
-              <motion.button
-                key={s.name}
-                initial={{ opacity: 0, y: 24 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.08, duration: 0.45 }}
-                whileHover={{ y: -6, scale: 1.03 }}
-                whileTap={{ scale: 0.96 }}
-                onClick={() => beginInterview(s.name)}
-                style={styles.subjectButton}
+        {/* Start / Status screens */}
+        {!started && (
+          <div style={styles.statusWrap}>{renderBody()}</div>
+        )}
+
+        {/* Join a live one-on-one video interview */}
+        {!started && (
+          <motion.div
+            initial={{ opacity: 0, y: 16 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4, delay: 0.1 }}
+            style={styles.liveCard}
+          >
+            <h3 style={styles.liveTitle}>
+              🎥 Live One-on-One Interview
+            </h3>
+
+            <p style={styles.liveText}>
+              Your interviewer can give you a room code for a live video
+              interview. Enter it below to join.
+            </p>
+
+            <div style={styles.liveRow}>
+              <input
+                type="text"
+                placeholder="Enter room code"
+                value={liveCode}
+                onChange={(e) =>
+                  setLiveCode(e.target.value.toUpperCase())
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") joinLiveInterview();
+                }}
+                style={styles.liveInput}
+              />
+
+              <button
+                onClick={joinLiveInterview}
+                disabled={joiningLive}
+                style={styles.liveBtn}
               >
-                <span style={styles.subjectIcon}>{s.icon}</span>
-                <span style={styles.subjectName}>{s.name}</span>
-                <span style={styles.subjectTag}>{s.tag}</span>
-              </motion.button>
-            ))}
-          </div>
+                {joiningLive ? "Joining..." : "Join"}
+              </button>
+            </div>
+
+            {liveJoinError && (
+              <p style={styles.liveError}>{liveJoinError}</p>
+            )}
+          </motion.div>
         )}
 
         {/* Chat Box */}
-        {selectedSubject && (
+        {started && (
           <div style={styles.chatBox} ref={chatBoxRef}>
             {chat.map((msg, index) => (
               <motion.div
@@ -414,18 +670,20 @@ function Interview({
         )}
 
         {/* Input Area */}
-        {selectedSubject && !interviewEnded && (
+        {started && !interviewEnded && (
           <div style={styles.inputContainer}>
             <input
               type="text"
               placeholder="Type your answer..."
+              autoComplete="off"
+              autoCorrect="off"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") sendMessage();
               }}
               style={styles.input}
-              disabled={!selectedSubject || isSending}
+              disabled={isSending}
             />
 
             <motion.button
@@ -433,7 +691,7 @@ function Interview({
               whileTap={{ scale: 0.94 }}
               onClick={sendMessage}
               style={styles.sendButton}
-              disabled={!selectedSubject || isSending}
+              disabled={isSending}
             >
               Send ➤
             </motion.button>
@@ -441,7 +699,7 @@ function Interview({
         )}
 
         {/* Ended note */}
-        {selectedSubject && interviewEnded && (
+        {started && interviewEnded && (
           <motion.p
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -468,6 +726,41 @@ const styles = {
     WebkitUserSelect: "none",
   },
 
+  navRow: {
+    width: "100%",
+    maxWidth: 900,
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
+  },
+
+  navBack: {
+    padding: "9px 18px",
+    borderRadius: radius.pill,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.06)",
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    transition: "background 0.2s",
+  },
+
+  navLogout: {
+    padding: "9px 18px",
+    borderRadius: radius.pill,
+    border: "1px solid rgba(248,113,113,0.4)",
+    background: "rgba(239,68,68,0.12)",
+    color: "#fca5a5",
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    transition: "background 0.2s, color 0.2s",
+  },
+
   header: {
     textAlign: "center",
     marginBottom: 18,
@@ -483,6 +776,134 @@ const styles = {
     color: colors.textMuted,
     fontSize: 17,
     margin: 0,
+  },
+
+  statusWrap: {
+    width: "100%",
+    maxWidth: 640,
+  },
+
+  liveCard: {
+    width: "100%",
+    maxWidth: 640,
+    marginTop: 18,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    textAlign: "center",
+    gap: 10,
+    padding: "24px 28px",
+    background: "rgba(255,255,255,0.04)",
+    backdropFilter: "blur(14px)",
+    WebkitBackdropFilter: "blur(14px)",
+    border: `1px solid ${colors.border}`,
+    borderRadius: radius.lg,
+    boxShadow: shadows.card,
+  },
+
+  liveTitle: {
+    fontSize: 18,
+    fontWeight: 800,
+    margin: 0,
+    color: colors.text,
+  },
+
+  liveText: {
+    color: colors.textMuted,
+    fontSize: 14,
+    lineHeight: 1.5,
+    margin: 0,
+  },
+
+  liveRow: {
+    display: "flex",
+    gap: 10,
+    width: "100%",
+    maxWidth: 360,
+    marginTop: 4,
+  },
+
+  liveInput: {
+    flex: 1,
+    padding: "11px 14px",
+    borderRadius: radius.md,
+    border: `1px solid ${colors.border}`,
+    outline: "none",
+    fontSize: 15,
+    textTransform: "uppercase",
+    background: "rgba(255,255,255,0.06)",
+    color: colors.text,
+    fontFamily: fonts.mono,
+    letterSpacing: "2px",
+    transition: "border-color 0.2s, box-shadow 0.2s",
+  },
+
+  liveBtn: {
+    padding: "11px 22px",
+    borderRadius: radius.md,
+    border: "none",
+    background: gradients.success,
+    color: "white",
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    boxShadow: "0 8px 24px rgba(34,197,94,0.3)",
+  },
+
+  liveError: {
+    color: colors.dangerLight,
+    fontSize: 13,
+    margin: 0,
+  },
+
+  centerNote: {
+    display: "flex",
+    justifyContent: "center",
+    padding: "60px 0",
+  },
+
+  startCard: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    textAlign: "center",
+    gap: 12,
+    padding: "46px 34px",
+    background: "rgba(255,255,255,0.04)",
+    backdropFilter: "blur(14px)",
+    WebkitBackdropFilter: "blur(14px)",
+    border: `1px solid ${colors.border}`,
+    borderRadius: radius.xl,
+    boxShadow: shadows.card,
+  },
+
+  bigIcon: {
+    fontSize: 52,
+  },
+
+  startTitle: {
+    fontSize: 26,
+    fontWeight: 800,
+    margin: 0,
+  },
+
+  startText: {
+    color: colors.textMuted,
+    fontSize: 15,
+    lineHeight: 1.6,
+    margin: 0,
+  },
+
+  startError: {
+    color: colors.dangerLight,
+    fontSize: 14,
+    lineHeight: 1.5,
+    margin: 0,
+    padding: "10px 14px",
+    borderRadius: radius.md,
+    background: "rgba(239,68,68,0.12)",
+    border: "1px solid rgba(248,113,113,0.4)",
   },
 
   progressRow: {
@@ -552,44 +973,6 @@ const styles = {
     color: colors.dangerLight,
     fontSize: 14,
     textAlign: "center",
-  },
-
-  subjectContainer: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-    gap: 16,
-    width: "100%",
-    maxWidth: 900,
-    margin: "20px 0",
-  },
-
-  subjectButton: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    gap: 8,
-    padding: "26px 18px",
-    borderRadius: radius.lg,
-    border: `1px solid ${colors.border}`,
-    background: "rgba(255,255,255,0.05)",
-    color: colors.text,
-    cursor: "pointer",
-    fontFamily: fonts.family,
-    transition: "border-color 0.25s, box-shadow 0.25s",
-  },
-
-  subjectIcon: {
-    fontSize: 34,
-  },
-
-  subjectName: {
-    fontSize: 16,
-    fontWeight: 700,
-  },
-
-  subjectTag: {
-    fontSize: 12,
-    color: colors.textMuted,
   },
 
   chatBox: {

@@ -53,7 +53,8 @@ function buildPdf(data) {
     // Details table
     const details = [
       ["Student", data.student],
-      ["Subject", data.subject],
+      ["Class", data.className || "—"],
+      ["Interview", data.subject || "Common Interview"],
       ["Interviewer", data.interviewer || "—"],
       ["Total Score", `${data.totalScore}/${data.entries.length * 10}`],
       ["Warnings (Violations)", String(data.violationCount || 0)],

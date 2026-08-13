@@ -14,6 +14,8 @@ export const USER_KEYS = {
   interviewer: "am_interviewer_user",
 };
 
+export const STUDENT_CLASS_KEY = "am_student_class";
+
 export function getToken(role) {
   return localStorage.getItem(TOKEN_KEYS[role]) || "";
 }
@@ -21,6 +23,14 @@ export function getToken(role) {
 export function setAuth(role, token, username) {
   localStorage.setItem(TOKEN_KEYS[role], token);
   localStorage.setItem(USER_KEYS[role], username || "");
+}
+
+export function setStudentClass(className) {
+  localStorage.setItem(STUDENT_CLASS_KEY, className || "");
+}
+
+export function getStudentClass() {
+  return localStorage.getItem(STUDENT_CLASS_KEY) || "";
 }
 
 export function clearAuth() {
@@ -31,6 +41,8 @@ export function clearAuth() {
   Object.values(USER_KEYS).forEach((k) =>
     localStorage.removeItem(k)
   );
+
+  localStorage.removeItem(STUDENT_CLASS_KEY);
 }
 
 const api = axios.create({
@@ -55,7 +67,20 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response && error.response.status === 401) {
-      clearAuth();
+      // Only clear the session for the role that actually got the 401, so
+      // one expired student call does not log the interviewer out too.
+      const role = error.config?.authRole;
+
+      if (role && TOKEN_KEYS[role]) {
+        localStorage.removeItem(TOKEN_KEYS[role]);
+        localStorage.removeItem(USER_KEYS[role]);
+
+        if (role === "student") {
+          localStorage.removeItem(STUDENT_CLASS_KEY);
+        }
+      } else {
+        clearAuth();
+      }
     }
 
     return Promise.reject(error);

@@ -1,20 +1,17 @@
 const mongoose = require("mongoose");
 
-const studentSchema = new mongoose.Schema({
-  username: {
+const liveSessionSchema = new mongoose.Schema({
+  code: {
     type: String,
     required: true,
     unique: true,
+    uppercase: true,
+    trim: true,
   },
 
-  password: {
+  interviewerUsername: {
     type: String,
     required: true,
-  },
-
-  name: {
-    type: String,
-    default: "",
   },
 
   className: {
@@ -22,9 +19,15 @@ const studentSchema = new mongoose.Schema({
     default: "",
   },
 
-  createdBy: {
+  studentUsername: {
     type: String,
     default: "",
+  },
+
+  status: {
+    type: String,
+    enum: ["waiting", "active", "ended"],
+    default: "waiting",
   },
 
   createdAt: {
@@ -34,6 +37,6 @@ const studentSchema = new mongoose.Schema({
 });
 
 module.exports = mongoose.model(
-  "Student",
-  studentSchema
+  "LiveSession",
+  liveSessionSchema
 );

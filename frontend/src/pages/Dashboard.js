@@ -7,6 +7,7 @@ import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 
 import CountUp from "../components/CountUp";
+import { useToast } from "../components/Toast";
 import { clearAuth } from "../api";
 import api from "../api";
 import { colors, fonts, gradients, radius } from "../styles/theme";
@@ -41,6 +42,10 @@ function Skeleton() {
 
 function Dashboard({ onLogout }) {
   const navigate = useNavigate();
+
+  const toast = useToast();
+
+  const [startingLive, setStartingLive] = useState(false);
 
   const [interviews, setInterviews] =
     useState([]);
@@ -82,6 +87,31 @@ function Dashboard({ onLogout }) {
     navigate("/");
   };
 
+  const handleStartLive = async () => {
+    if (startingLive) return;
+
+    setStartingLive(true);
+
+    try {
+      const response = await api.post(
+        "/api/live/create",
+        {},
+        { authRole: "interviewer" }
+      );
+
+      navigate(`/live/${response.data.code}`);
+    } catch (error) {
+      console.log(error);
+
+      toast.error(
+        error.response?.data?.message ||
+          "Could not start a live session. Please check the backend connection."
+      );
+    } finally {
+      setStartingLive(false);
+    }
+  };
+
   const stats = useMemo(() => {
     const total = interviews.length;
 
@@ -96,18 +126,19 @@ function Dashboard({ onLogout }) {
           ).toFixed(1)
         : 0;
 
-    const subjects = new Set(
-      interviews.map((i) => i.subject)
+    const classes = new Set(
+      interviews.map((i) => i.className || "Unassigned")
     ).size;
 
-    return { total, avg, subjects };
+    return { total, avg, classes };
   }, [interviews]);
 
   const distribution = useMemo(() => {
     const map = {};
 
     interviews.forEach((i) => {
-      map[i.subject] = (map[i.subject] || 0) + 1;
+      const key = i.className || "Unassigned";
+      map[key] = (map[key] || 0) + 1;
     });
 
     return Object.entries(map).sort(
@@ -126,7 +157,10 @@ function Dashboard({ onLogout }) {
         i.studentUsername
           .toLowerCase()
           .includes(query.toLowerCase()) ||
-        i.subject
+        (i.className || "")
+          .toLowerCase()
+          .includes(query.toLowerCase()) ||
+        (i.question || "")
           .toLowerCase()
           .includes(query.toLowerCase())
     );
@@ -165,9 +199,30 @@ function Dashboard({ onLogout }) {
           Monitor your students' interview performance and analytics
         </p>
 
-        <button onClick={handleLogout} style={styles.logoutBtn}>
-          Logout
-        </button>
+        <div style={styles.headerActions}>
+          <button onClick={() => navigate(-1)} style={styles.backBtn}>
+            ← Back
+          </button>
+
+          <button
+            onClick={() => navigate("/setup")}
+            style={styles.manageBtn}
+          >
+            ⚙️ Manage Students & Syllabus
+          </button>
+
+          <button
+            onClick={handleStartLive}
+            style={styles.liveBtn}
+            disabled={startingLive}
+          >
+            {startingLive ? "Starting..." : "🎥 Start Live Video Interview"}
+          </button>
+
+          <button onClick={handleLogout} style={styles.logoutBtn}>
+            Logout
+          </button>
+        </div>
       </motion.div>
 
       {/* Analytics Cards */}
@@ -187,8 +242,8 @@ function Dashboard({ onLogout }) {
           },
           {
             icon: "📚",
-            label: "Subjects Covered",
-            value: stats.subjects,
+            label: "Classes Covered",
+            value: stats.classes,
             decimals: 0,
           },
         ].map((card, i) => (
@@ -227,7 +282,7 @@ function Dashboard({ onLogout }) {
           transition={{ delay: 0.25 }}
           style={styles.chartCard}
         >
-          <h3 style={styles.chartTitle}>Interviews by Subject</h3>
+          <h3 style={styles.chartTitle}>Interviews by Class</h3>
 
           {distribution.length === 0 && !loading && (
             <p style={styles.emptyText}>No data yet</p>
@@ -347,7 +402,7 @@ function Dashboard({ onLogout }) {
               <thead>
                 <tr>
                   <th>Student</th>
-                  <th>Subject</th>
+                  <th>Class</th>
                   <th>Question</th>
                   <th>Score</th>
                   <th>Violations</th>
@@ -376,7 +431,9 @@ function Dashboard({ onLogout }) {
                     </td>
 
                     <td style={styles.td}>
-                      <span style={styles.subjectTag}>{item.subject}</span>
+                      <span style={styles.subjectTag}>
+                        {item.className || "Unassigned"}
+                      </span>
                     </td>
 
                     <td style={{ ...styles.td, maxWidth: 260 }}>
@@ -474,6 +531,53 @@ const styles = {
     fontFamily: fonts.family,
     cursor: "pointer",
     transition: "background 0.2s, color 0.2s",
+  },
+
+  backBtn: {
+    marginTop: 14,
+    padding: "9px 22px",
+    borderRadius: radius.pill,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.06)",
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    transition: "background 0.2s",
+  },
+
+  headerActions: {
+    display: "flex",
+    gap: 10,
+    justifyContent: "center",
+    marginTop: 14,
+  },
+
+  manageBtn: {
+    padding: "9px 22px",
+    borderRadius: radius.pill,
+    border: "none",
+    background: gradients.primary,
+    color: "white",
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    boxShadow: "0 8px 24px rgba(37,99,235,0.35)",
+  },
+
+  liveBtn: {
+    padding: "9px 22px",
+    borderRadius: radius.pill,
+    border: "none",
+    background: gradients.success,
+    color: "white",
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    boxShadow: "0 8px 24px rgba(34,197,94,0.35)",
   },
 
   cardContainer: {

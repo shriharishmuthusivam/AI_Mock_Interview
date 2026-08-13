@@ -20,9 +20,11 @@ import InterviewerRegister from "./pages/InterviewerRegister";
 
 import Interview from "./pages/Interview";
 
-import CreateStudent from "./pages/CreateStudent";
+import Setup from "./pages/Setup";
 
 import Dashboard from "./pages/Dashboard";
+
+import LiveInterview from "./pages/LiveInterview";
 
 import ResultScreen from "./pages/ResultScreen";
 
@@ -51,6 +53,8 @@ function App() {
 
   const [totalScore, setTotalScore] = useState(0);
 
+  const [maxScore, setMaxScore] = useState(100);
+
   const location = useLocation();
 
   const handleRestart = () => {
@@ -71,6 +75,8 @@ function App() {
     setShowResult(false);
 
     setTotalScore(0);
+
+    setMaxScore(100);
 
     navigate("/");
   };
@@ -125,11 +131,15 @@ function App() {
                       setTotalScore={
                         setTotalScore
                       }
+                      setMaxScore={
+                        setMaxScore
+                      }
+                      onLogout={handleLogout}
                     />
                   ) : (
                     <ResultScreen
                       totalScore={totalScore}
-                      maxScore={100}
+                      maxScore={maxScore}
                       onRestart={handleRestart}
                       onLogout={handleLogout}
                     />
@@ -167,13 +177,39 @@ function App() {
               }
             />
 
+            {/* Setup (interviewer manages students + syllabus) */}
+            <Route
+              path="/setup"
+              element={
+                isInterviewerLoggedIn ? (
+                  <Setup onLogout={handleLogout} />
+                ) : (
+                  <Navigate
+                    to="/interviewer-login"
+                    replace
+                  />
+                )
+              }
+            />
+
+            {/* Live one-on-one video interview (student or interviewer) */}
+            <Route
+              path="/live/:code"
+              element={
+                isLoggedIn || isInterviewerLoggedIn ? (
+                  <LiveInterview onLogout={handleLogout} />
+                ) : (
+                  <Navigate to="/" replace />
+                )
+              }
+            />
+
             {/* Dashboard */}
             <Route
               path="/dashboard"
               element={
                 isInterviewerLoggedIn ? (
                   <AnimatedBackground>
-                    <CreateStudent />
                     <Dashboard
                       onLogout={handleLogout}
                     />

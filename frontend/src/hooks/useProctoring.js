@@ -149,18 +149,18 @@ function useProctoring({
         );
       };
 
-      const onFullscreenChange =
-        () => {
-          if (
-            !document.fullscreenElement
-          ) {
-            countViolation(
-              "Exited fullscreen. This counts as a warning."
-            );
-
-            enterFullscreen();
-          }
-        };
+      // Browsers force-exit fullscreen whenever a text input is
+      // focused (keyboard / autofill UI), so exiting fullscreen is
+      // NOT a violation. Instead the page is pulled back into
+      // fullscreen on the next user gesture (see reenterFullscreen).
+      const reenterFullscreen = () => {
+        if (
+          activeRef.current &&
+          !document.fullscreenElement
+        ) {
+          enterFullscreen();
+        }
+      };
 
       const onKeyDown = (e) => {
         const key = (e.key || "")
@@ -249,7 +249,7 @@ function useProctoring({
       handlersRef.current = {
         onVisibility,
         onBlur,
-        onFullscreenChange,
+        reenterFullscreen,
         onKeyDown,
         onContextMenu,
         onCopy,
@@ -269,9 +269,14 @@ function useProctoring({
         onBlur
       );
 
-      document.addEventListener(
-        "fullscreenchange",
-        onFullscreenChange
+      window.addEventListener(
+        "pointerdown",
+        reenterFullscreen
+      );
+
+      window.addEventListener(
+        "keydown",
+        reenterFullscreen
       );
 
       window.addEventListener(
@@ -342,9 +347,14 @@ function useProctoring({
         h.onBlur
       );
 
-      document.removeEventListener(
-        "fullscreenchange",
-        h.onFullscreenChange
+      window.removeEventListener(
+        "pointerdown",
+        h.reenterFullscreen
+      );
+
+      window.removeEventListener(
+        "keydown",
+        h.reenterFullscreen
       );
 
       window.removeEventListener(
