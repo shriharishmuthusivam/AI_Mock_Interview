@@ -6,9 +6,20 @@ Follow this guide to run it on your own machine.
 ## Requirements
 
 - **Node.js LTS** (18 or 20+)
-- A MongoDB database — easiest is a free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster; a local `mongod` also works.
+- **MongoDB Community Server** (local) — or a free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster as an alternative.
 - A [Groq](https://console.groq.com) API key (free tier is enough). Interviews will not work without it.
 - Optional: a Gmail/any SMTP account for PDF report emails (interviewer reports are emailed to the interviewer).
+
+## Local MongoDB setup (recommended)
+
+1. Download **MongoDB Community Server** from https://www.mongodb.com/try/download/community (Windows MSI, or the Linux package).
+2. Install it — on Windows keep the default and let it install MongoDB as a **service** (starts automatically).
+3. Verify it is running:
+   - Windows: `Get-Service MongoDB` should show `Running`.
+   - Linux: `sudo systemctl status mongod` should show `active (running)`.
+4. Optional: install **MongoDB Compass** (https://www.mongodb.com/products/compass) to browse the data.
+
+No database creation is needed — the app creates `ai_mock_interview` automatically on first run.
 
 ## Project layout
 
@@ -37,7 +48,7 @@ Then fill in `backend/.env`:
 | Variable | Required | What it is |
 |---|---|---|
 | `GROQ_API_KEY` | Yes | AI key from https://console.groq.com |
-| `MONGO_URI` | Yes | MongoDB connection string |
+| `MONGO_URI` | Yes | MongoDB connection string. Local default: `mongodb://127.0.0.1:27017/ai_mock_interview`. For Atlas: `mongodb+srv://<user>:<password>@<cluster>.mongodb.net/ai_mock_interview?retryWrites=true&w=majority` |
 | `JWT_SECRET` | Yes | Any long random string (change it) |
 | `CLIENT_URL` | No | Frontend origin allowed by CORS (default `http://localhost:3000`) |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM` | No | Report email. If unset, reports are generated but email is skipped. |
