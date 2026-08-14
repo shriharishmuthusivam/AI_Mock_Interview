@@ -11,6 +11,7 @@ import { useToast } from "../components/Toast";
 import { clearAuth } from "../api";
 import api from "../api";
 import { colors, fonts, gradients, radius } from "../styles/theme";
+import { CLASSES } from "../constants";
 
 const SUBJECT_COLORS = [
   "#2563eb",
@@ -56,6 +57,12 @@ function Dashboard({ onLogout }) {
   const [query, setQuery] = useState("");
 
   const [sort, setSort] = useState("newest");
+
+  const [classFilter, setClassFilter] = useState("");
+
+  const [dateFrom, setDateFrom] = useState("");
+
+  const [dateTo, setDateTo] = useState("");
 
   useEffect(() => {
     fetchInterviews();
@@ -112,73 +119,146 @@ function Dashboard({ onLogout }) {
     }
   };
 
+  // Group raw Q&A rows into interview sessions
+  const sessions = useMemo(() => {
+    const map = new Map();
+
+    interviews.forEach((item) => {
+      const key =
+        item.sessionId ||
+        `no-session-${item.studentUsername}-${item.createdAt}`;
+
+      if (!map.has(key)) {
+        map.set(key, []);
+      }
+
+      map.get(key).push(item);
+    });
+
+    return Array.from(map.values()).map((rows) => {
+      const totalScore = rows.reduce(
+        (acc, r) => acc + (Number(r.score) || 0),
+        0
+      );
+
+      const qCount = rows.length;
+
+      return {
+        key: rows[0].sessionId || "no-session",
+        studentUsername: rows[0].studentUsername,
+        className: rows[0].className || "",
+        createdAt: new Date(rows[0].createdAt),
+        questionCount: qCount,
+        avgScore: qCount > 0 ? totalScore / qCount : 0,
+        totalScore,
+        violations: Math.max(
+          0,
+          ...rows.map((r) => Number(r.violationCount) || 0)
+        ),
+        completed: rows.some((r) => r.completed),
+      };
+    });
+  }, [interviews]);
+
+  // A student only counts once, and only if they finished an
+  // interview (i.e. a final score / report was generated).
   const stats = useMemo(() => {
-    const total = interviews.length;
+    const completed = sessions.filter((s) => s.completed);
+
+    const studentMap = new Map();
+
+    completed.forEach((s) => {
+      const existing = studentMap.get(s.studentUsername);
+
+      if (
+        !existing ||
+        new Date(s.createdAt) > new Date(existing.createdAt)
+      ) {
+        studentMap.set(s.studentUsername, s);
+      }
+    });
+
+    const counted = Array.from(studentMap.values());
+
+    const total = counted.length;
 
     const avg =
       total > 0
         ? (
-            interviews.reduce(
-              (acc, i) =>
-                acc + (i.score || 0),
-              0
-            ) / total
+            counted.reduce((acc, s) => acc + s.avgScore, 0) / total
           ).toFixed(1)
         : 0;
 
     const classes = new Set(
-      interviews.map((i) => i.className || "Unassigned")
+      completed.map((s) => s.className || "Unassigned")
     ).size;
 
     return { total, avg, classes };
-  }, [interviews]);
+  }, [sessions]);
 
   const distribution = useMemo(() => {
     const map = {};
 
-    interviews.forEach((i) => {
-      const key = i.className || "Unassigned";
+    sessions.forEach((s) => {
+      if (!s.completed) return;
+
+      const key = s.className || "Unassigned";
+
       map[key] = (map[key] || 0) + 1;
     });
 
     return Object.entries(map).sort(
       (a, b) => b[1] - a[1]
     );
-  }, [interviews]);
+  }, [sessions]);
 
   const trend = useMemo(
-    () => [...interviews].slice(0, 10).reverse(),
-    [interviews]
+    () => sessions.filter((s) => s.completed).slice(0, 10).reverse(),
+    [sessions]
   );
 
   const rows = useMemo(() => {
-    let list = interviews.filter(
-      (i) =>
-        i.studentUsername
-          .toLowerCase()
-          .includes(query.toLowerCase()) ||
-        (i.className || "")
-          .toLowerCase()
-          .includes(query.toLowerCase()) ||
-        (i.question || "")
-          .toLowerCase()
-          .includes(query.toLowerCase())
-    );
+    const q = query.toLowerCase();
+
+    let list = sessions.filter((s) => {
+      const matchesQuery =
+        !q ||
+        s.studentUsername.toLowerCase().includes(q) ||
+        (s.className || "").toLowerCase().includes(q);
+
+      const matchesClass =
+        !classFilter ||
+        (classFilter === "unassigned"
+          ? !s.className
+          : s.className === classFilter);
+
+      const day = `${s.createdAt.getFullYear()}-${String(
+        s.createdAt.getMonth() + 1
+      ).padStart(2, "0")}-${String(
+        s.createdAt.getDate()
+      ).padStart(2, "0")}`;
+
+      const matchesFrom = !dateFrom || day >= dateFrom;
+
+      const matchesTo = !dateTo || day <= dateTo;
+
+      return (
+        matchesQuery && matchesClass && matchesFrom && matchesTo
+      );
+    });
 
     if (sort === "high") {
-      list = [...list].sort(
-        (a, b) => (b.score || 0) - (a.score || 0)
-      );
+      list = [...list].sort((a, b) => b.avgScore - a.avgScore);
     } else if (sort === "low") {
-      list = [...list].sort(
-        (a, b) => (a.score || 0) - (b.score || 0)
-      );
+      list = [...list].sort((a, b) => a.avgScore - b.avgScore);
     } else {
-      list = [...list].reverse();
+      list = [...list].sort(
+        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+      );
     }
 
     return list;
-  }, [interviews, query, sort]);
+  }, [sessions, query, sort, classFilter, dateFrom, dateTo]);
 
   const maxDist =
     distribution.length > 0
@@ -328,7 +408,7 @@ function Dashboard({ onLogout }) {
 
           <div style={styles.trendList}>
             {trend.map((item, idx) => {
-              const pct = Math.max((item.score || 0) / 10, 0.04);
+              const pct = Math.max(item.avgScore / 10, 0.04);
 
               return (
                 <div key={idx} style={styles.trendItem}>
@@ -340,7 +420,7 @@ function Dashboard({ onLogout }) {
                       style={{
                         ...styles.trendFill,
                         background:
-                          item.score >= 7
+                          item.avgScore >= 7
                             ? gradients.success
                             : gradients.danger,
                       }}
@@ -348,7 +428,7 @@ function Dashboard({ onLogout }) {
                   </span>
 
                   <span style={styles.trendScore}>
-                    {item.score || 0}
+                    {item.avgScore.toFixed(1)}
                   </span>
                 </div>
               );
@@ -367,10 +447,42 @@ function Dashboard({ onLogout }) {
         <div style={styles.tableToolbar}>
           <input
             type="text"
-            placeholder="Search student or subject..."
+            placeholder="Search student or class..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             style={styles.search}
+          />
+
+          <select
+            value={classFilter}
+            onChange={(e) => setClassFilter(e.target.value)}
+            style={styles.select}
+          >
+            <option value="">All classes</option>
+
+            {CLASSES.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+
+            <option value="unassigned">Unassigned</option>
+          </select>
+
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            style={{ ...styles.dateInput, width: 150 }}
+            title="From date"
+          />
+
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            style={{ ...styles.dateInput, width: 150 }}
+            title="To date"
           />
 
           <select
@@ -392,8 +504,8 @@ function Dashboard({ onLogout }) {
           </div>
         ) : rows.length === 0 ? (
           <p style={styles.emptyState}>
-            {query
-              ? "No results match your search."
+            {query || classFilter || dateFrom || dateTo
+              ? "No interviews match your filters."
               : "No interviews recorded yet. Ask a student to take an interview."}
           </p>
         ) : (
@@ -403,17 +515,19 @@ function Dashboard({ onLogout }) {
                 <tr>
                   <th>Student</th>
                   <th>Class</th>
-                  <th>Question</th>
-                  <th>Score</th>
+                  <th>Date</th>
+                  <th>Questions</th>
+                  <th>Avg Score</th>
+                  <th>Total</th>
                   <th>Violations</th>
-                  <th>Feedback</th>
+                  <th>Status</th>
                 </tr>
               </thead>
 
               <tbody>
                 {rows.map((item, index) => (
                   <motion.tr
-                    key={`${item._id || index}`}
+                    key={`${item.key}-${item.studentUsername}`}
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     transition={{ delay: index * 0.03 }}
@@ -436,9 +550,15 @@ function Dashboard({ onLogout }) {
                       </span>
                     </td>
 
-                    <td style={{ ...styles.td, maxWidth: 260 }}>
+                    <td style={styles.td}>
                       <span style={styles.feedback}>
-                        {item.question || "—"}
+                        {item.createdAt.toLocaleDateString()}
+                      </span>
+                    </td>
+
+                    <td style={styles.td}>
+                      <span style={styles.feedback}>
+                        {item.questionCount}
                       </span>
                     </td>
 
@@ -447,19 +567,27 @@ function Dashboard({ onLogout }) {
                         style={{
                           ...styles.scoreBadge,
                           background:
-                            item.score >= 7
+                            item.avgScore >= 7
                               ? "rgba(34,197,94,0.15)"
                               : "rgba(239,68,68,0.15)",
                           color:
-                            item.score >= 7 ? "#4ade80" : "#f87171",
+                            item.avgScore >= 7
+                              ? "#4ade80"
+                              : "#f87171",
                           border: `1px solid ${
-                            item.score >= 7
+                            item.avgScore >= 7
                               ? "rgba(34,197,94,0.4)"
                               : "rgba(239,68,68,0.4)"
                           }`,
                         }}
                       >
-                        {item.score || 0}/10
+                        {item.avgScore.toFixed(1)}/10
+                      </span>
+                    </td>
+
+                    <td style={styles.td}>
+                      <span style={styles.feedback}>
+                        {item.totalScore}/{item.questionCount * 10}
                       </span>
                     </td>
 
@@ -468,18 +596,33 @@ function Dashboard({ onLogout }) {
                         style={{
                           ...styles.violationBadge,
                           color:
-                            (item.violationCount || 0) > 0
+                            item.violations > 0
                               ? "#fbbf24"
                               : colors.textMuted,
                         }}
                       >
-                        {item.violationCount || 0}
+                        {item.violations}
                       </span>
                     </td>
 
-                    <td style={{ ...styles.td, maxWidth: 280 }}>
-                      <span style={styles.feedback}>
-                        {item.feedback || "—"}
+                    <td style={styles.td}>
+                      <span
+                        style={{
+                          ...styles.statusBadge,
+                          background: item.completed
+                            ? "rgba(34,197,94,0.12)"
+                            : "rgba(148,163,184,0.12)",
+                          color: item.completed
+                            ? "#4ade80"
+                            : "#94a3b8",
+                          border: `1px solid ${
+                            item.completed
+                              ? "rgba(34,197,94,0.4)"
+                              : "rgba(148,163,184,0.3)"
+                          }`,
+                        }}
+                      >
+                        {item.completed ? "Completed" : "Partial"}
                       </span>
                     </td>
                   </motion.tr>
@@ -761,6 +904,18 @@ const styles = {
     cursor: "pointer",
   },
 
+  dateInput: {
+    padding: "10px 14px",
+    borderRadius: radius.md,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.06)",
+    color: colors.text,
+    fontFamily: fonts.family,
+    fontSize: 14,
+    outline: "none",
+    colorScheme: "dark",
+  },
+
   tableScroll: {
     overflowX: "auto",
   },
@@ -768,7 +923,7 @@ const styles = {
   table: {
     width: "100%",
     borderCollapse: "collapse",
-    minWidth: 680,
+    minWidth: 860,
   },
 
   row: {
@@ -825,6 +980,13 @@ const styles = {
     fontFamily: fonts.mono,
     fontSize: 14,
     fontWeight: 600,
+  },
+
+  statusBadge: {
+    padding: "6px 12px",
+    borderRadius: radius.pill,
+    fontSize: 12,
+    fontWeight: 700,
   },
 
   feedback: {

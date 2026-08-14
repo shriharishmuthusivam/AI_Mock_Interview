@@ -1165,6 +1165,11 @@ app.post(
 
       const pdfBuffer = await buildPdf(reportData);
 
+      await Interview.updateMany(
+        { studentUsername, sessionId },
+        { $set: { completed: true } }
+      );
+
       let emailed = false;
 
       if (interviewerUsername) {
@@ -1360,6 +1365,19 @@ app.get(
         return res.status(404).json({
           message: "Invalid room code",
         });
+      }
+
+      // A student who opens a shared room link (with a valid code) is
+      // treated as joining it, so a direct URL works without a separate
+      // join call. Rooms already claimed by another student are not taken.
+      if (
+        req.student &&
+        !session.studentUsername &&
+        session.status !== "ended"
+      ) {
+        session.studentUsername = req.student.username;
+        session.status = "active";
+        await session.save();
       }
 
       const actor = req.interviewer || req.student;
