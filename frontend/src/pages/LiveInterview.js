@@ -1,14 +1,28 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 
 import AnimatedBackground from "../components/AnimatedBackground";
+import { useToast } from "../components/Toast";
 import api, { TOKEN_KEYS, USER_KEYS, clearAuth } from "../api";
 import { colors, fonts, gradients, radius } from "../styles/theme";
+
+function formatElapsed(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
 
 function LiveInterview({ onLogout }) {
   const { code } = useParams();
   const navigate = useNavigate();
+  const toast = useToast();
 
   const isInterviewer = !!localStorage.getItem(TOKEN_KEYS.interviewer);
   const role = isInterviewer ? "interviewer" : "student";
@@ -23,6 +37,17 @@ function LiveInterview({ onLogout }) {
   const [copied, setCopied] = useState(false);
   const [showVideo, setShowVideo] = useState(false);
   const [joinedNote, setJoinedNote] = useState(false);
+
+  const [elapsed, setElapsed] = useState(0);
+  const timerRef = useRef(null);
+
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
+  const [ending, setEnding] = useState(false);
+
+  const [showScoreCard, setShowScoreCard] = useState(false);
+  const [score, setScore] = useState("");
+  const [scoreError, setScoreError] = useState("");
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!roomCode) {
@@ -43,6 +68,12 @@ function LiveInterview({ onLogout }) {
         if (cancelled) return;
 
         setSession(response.data);
+
+        if (response.data.status === "ended" && !isInterviewer) {
+          setError("This live session has ended.");
+          setLoading(false);
+          return;
+        }
 
         if (role === "student") {
           setTimeout(() => {
@@ -98,6 +129,19 @@ function LiveInterview({ onLogout }) {
     return () => clearInterval(interval);
   }, [role, roomCode, showVideo]);
 
+  // Timer: count up once video starts
+  useEffect(() => {
+    if (!showVideo) return;
+
+    timerRef.current = setInterval(() => {
+      setElapsed((prev) => prev + 1);
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [showVideo]);
+
   const handleLogout = () => {
     clearAuth();
 
@@ -107,17 +151,61 @@ function LiveInterview({ onLogout }) {
   };
 
   const handleEnd = async () => {
+    setEnding(true);
+
     try {
       await api.post(
         `/api/live/${roomCode}/end`,
         {},
         { authRole: role }
       );
-    } catch (error) {
-      console.log(error);
+    } catch (err) {
+      console.log(err);
     }
 
-    navigate(isInterviewer ? "/dashboard" : "/interview");
+    if (isInterviewer && !session?.score) {
+      setShowEndConfirm(false);
+      setShowScoreCard(true);
+      setEnding(false);
+      return;
+    }
+
+    setEnding(false);
+    navigate("/dashboard");
+  };
+
+  const handleSubmitScore = async () => {
+    const val = parseFloat(score);
+
+    if (Number.isNaN(val) || val < 0 || val > 10) {
+      setScoreError("Please enter a score between 0 and 10.");
+      return;
+    }
+
+    setSaving(true);
+    setScoreError("");
+
+    try {
+      await api.post(
+        `/api/live/${roomCode}/score`,
+        { score: val },
+        { authRole: "interviewer" }
+      );
+
+      toast.success("Score saved successfully.");
+      navigate("/dashboard");
+    } catch (err) {
+      setScoreError(
+        err.response?.data?.message ||
+          "Could not save score. Please try again."
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSkipScore = () => {
+    navigate("/dashboard");
   };
 
   const handleLeave = () => {
@@ -168,12 +256,16 @@ function LiveInterview({ onLogout }) {
           <h1 style={styles.title}>Live Video Interview</h1>
 
           <p style={styles.subtitle}>
-            One-on-one interview with your interviewer
+            One-on-one interview with your{isInterviewer ? " student" : " interviewer"}
           </p>
         </motion.div>
 
         {loading && (
-          <div style={styles.centerNote}>Loading room...</div>
+          <div style={styles.skeletonWrap}>
+            <div style={styles.skeletonBar} />
+            <div style={{ ...styles.skeletonBar, width: "60%" }} />
+            <div style={{ ...styles.skeletonBar, width: "80%", height: 320 }} />
+          </div>
         )}
 
         {error && (
@@ -190,7 +282,69 @@ function LiveInterview({ onLogout }) {
           </div>
         )}
 
-        {!loading && !error && !showVideo && (
+        {/* Score card (interviewer only, after ending) */}
+        {showScoreCard && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+            style={styles.scoreCard}
+          >
+            <span style={styles.bigIcon}>⭐</span>
+
+            <h2 style={styles.startTitle}>Rate the student</h2>
+
+            <p style={styles.startText}>
+              How did <b>{session?.studentUsername || "the student"}</b> perform
+              in this interview?
+            </p>
+
+            <div style={styles.scoreInputRow}>
+              <input
+                type="number"
+                min="0"
+                max="10"
+                step="0.5"
+                placeholder="0 – 10"
+                value={score}
+                onChange={(e) => {
+                  setScore(e.target.value);
+                  setScoreError("");
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSubmitScore();
+                }}
+                style={styles.scoreInput}
+              />
+
+              <span style={styles.scoreMax}>/ 10</span>
+            </div>
+
+            {scoreError && (
+              <p style={styles.scoreError}>{scoreError}</p>
+            )}
+
+            <div style={styles.scoreActions}>
+              <button
+                onClick={handleSkipScore}
+                disabled={saving}
+                style={styles.skipBtn}
+              >
+                Skip
+              </button>
+
+              <button
+                onClick={handleSubmitScore}
+                disabled={saving}
+                style={styles.saveScoreBtn}
+              >
+                {saving ? "Saving..." : "Save Score"}
+              </button>
+            </div>
+          </motion.div>
+        )}
+
+        {!loading && !error && !showScoreCard && !showVideo && (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -248,7 +402,7 @@ function LiveInterview({ onLogout }) {
           </motion.div>
         )}
 
-        {!loading && !error && showVideo && (
+        {!loading && !error && !showScoreCard && showVideo && (
           <>
             {/* Joined note */}
             {joinedNote && (
@@ -258,11 +412,11 @@ function LiveInterview({ onLogout }) {
                 exit={{ opacity: 0 }}
                 style={styles.joinedBanner}
               >
-                🎉 The student joined the room — starting the video call.
+                The student joined the room — starting the video call.
               </motion.div>
             )}
 
-            {/* Room code bar */}
+            {/* Room code bar + timer */}
             <div style={styles.codeBar}>
               <span style={styles.codeLabel}>Room Code</span>
 
@@ -271,6 +425,8 @@ function LiveInterview({ onLogout }) {
               <button onClick={handleCopy} style={styles.copyBtn}>
                 {copied ? "Copied ✓" : "Copy"}
               </button>
+
+              <span style={styles.timer}>{formatElapsed(elapsed)}</span>
 
               {isInterviewer && (
                 <span style={styles.sessionTag}>
@@ -301,12 +457,62 @@ function LiveInterview({ onLogout }) {
                 Leave Room
               </button>
 
-              <button onClick={handleEnd} style={styles.endBtn}>
+              <button
+                onClick={() => setShowEndConfirm(true)}
+                style={styles.endBtn}
+              >
                 End Session
               </button>
             </div>
           </>
         )}
+
+        {/* End confirmation modal */}
+        <AnimatePresence>
+          {showEndConfirm && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              style={styles.overlay}
+              onClick={() => !ending && setShowEndConfirm(false)}
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                transition={{ duration: 0.2 }}
+                style={styles.modal}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 style={styles.modalTitle}>End this session?</h3>
+
+                <p style={styles.modalText}>
+                  The video call will be disconnected for both participants.
+                  {isInterviewer && " You will be asked to rate the student next."}
+                </p>
+
+                <div style={styles.modalActions}>
+                  <button
+                    onClick={() => setShowEndConfirm(false)}
+                    disabled={ending}
+                    style={styles.modalCancel}
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    onClick={handleEnd}
+                    disabled={ending}
+                    style={styles.modalConfirm}
+                  >
+                    {ending ? "Ending..." : "End Session"}
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </AnimatedBackground>
   );
@@ -379,6 +585,26 @@ const styles = {
     color: colors.textMuted,
     fontSize: 15,
     padding: "60px 0",
+  },
+
+  skeletonWrap: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 16,
+    width: "100%",
+    maxWidth: 960,
+    padding: "40px 0",
+  },
+
+  skeletonBar: {
+    width: "40%",
+    height: 22,
+    borderRadius: radius.md,
+    background:
+      "linear-gradient(90deg, rgba(255,255,255,0.04), rgba(255,255,255,0.1), rgba(255,255,255,0.04))",
+    backgroundSize: "200% 100%",
+    animation: "skeletonShimmer 1.2s linear infinite",
   },
 
   startCard: {
@@ -530,13 +756,24 @@ const styles = {
   },
 
   sessionTag: {
-    marginLeft: "auto",
     padding: "5px 12px",
     borderRadius: radius.pill,
     background: "rgba(124,58,237,0.15)",
     color: "#c084fc",
     fontSize: 13,
     fontWeight: 600,
+  },
+
+  timer: {
+    marginLeft: "auto",
+    fontFamily: fonts.mono,
+    fontSize: 15,
+    fontWeight: 700,
+    color: colors.textMuted,
+    padding: "4px 12px",
+    borderRadius: radius.pill,
+    background: "rgba(255,255,255,0.06)",
+    border: `1px solid ${colors.border}`,
   },
 
   videoWrap: {
@@ -578,6 +815,156 @@ const styles = {
 
   endBtn: {
     padding: "11px 26px",
+    borderRadius: radius.pill,
+    border: "none",
+    background: gradients.danger,
+    color: "white",
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    boxShadow: "0 8px 24px rgba(239,68,68,0.35)",
+  },
+
+  scoreCard: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    textAlign: "center",
+    gap: 14,
+    padding: "46px 40px",
+    background: "rgba(255,255,255,0.04)",
+    backdropFilter: "blur(14px)",
+    WebkitBackdropFilter: "blur(14px)",
+    border: `1px solid ${colors.border}`,
+    borderRadius: radius.xl,
+    boxShadow: "0 20px 60px rgba(0,0,0,0.35)",
+    maxWidth: 480,
+    width: "100%",
+  },
+
+  scoreInputRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 4,
+  },
+
+  scoreInput: {
+    width: 100,
+    padding: "12px 14px",
+    borderRadius: radius.md,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.06)",
+    color: colors.text,
+    fontFamily: fonts.mono,
+    fontSize: 22,
+    fontWeight: 700,
+    textAlign: "center",
+    outline: "none",
+  },
+
+  scoreMax: {
+    color: colors.textMuted,
+    fontSize: 18,
+    fontWeight: 600,
+  },
+
+  scoreError: {
+    color: "#f87171",
+    fontSize: 13,
+    fontWeight: 600,
+    margin: 0,
+  },
+
+  scoreActions: {
+    display: "flex",
+    gap: 12,
+    marginTop: 4,
+  },
+
+  skipBtn: {
+    padding: "11px 26px",
+    borderRadius: radius.pill,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.06)",
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    transition: "background 0.2s",
+  },
+
+  saveScoreBtn: {
+    padding: "11px 26px",
+    borderRadius: radius.pill,
+    border: "none",
+    background: gradients.success,
+    color: "white",
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    boxShadow: "0 8px 24px rgba(34,197,94,0.35)",
+  },
+
+  overlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+    padding: 20,
+  },
+
+  modal: {
+    background: "#0f172a",
+    border: `1px solid ${colors.border}`,
+    borderRadius: radius.xl,
+    padding: "32px 30px",
+    maxWidth: 420,
+    width: "100%",
+    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+  },
+
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 800,
+    margin: "0 0 10px",
+    color: colors.text,
+  },
+
+  modalText: {
+    color: colors.textMuted,
+    fontSize: 14,
+    lineHeight: 1.6,
+    margin: "0 0 22px",
+  },
+
+  modalActions: {
+    display: "flex",
+    gap: 12,
+    justifyContent: "flex-end",
+  },
+
+  modalCancel: {
+    padding: "10px 22px",
+    borderRadius: radius.pill,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.06)",
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: 600,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    transition: "background 0.2s",
+  },
+
+  modalConfirm: {
+    padding: "10px 22px",
     borderRadius: radius.pill,
     border: "none",
     background: gradients.danger,

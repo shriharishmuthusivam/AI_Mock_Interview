@@ -112,12 +112,9 @@ function InterviewerLogin({ setIsInterviewerLoggedIn }) {
             {loading ? "Logging in..." : "Login"}
           </GradientButton>
 
-          <button
-            onClick={() => navigate("/interviewer-register")}
-            style={styles.registerLink}
-          >
-            New interviewer? Create an account
-          </button>
+          <p style={styles.registerHint}>
+            Interviewer accounts are created by your college administrator.
+          </p>
         </GlassCard>
       </div>
     </AnimatedBackground>
@@ -175,16 +172,12 @@ const styles = {
     lineHeight: 1.5,
   },
 
-  registerLink: {
-    background: "transparent",
-    border: "none",
-    color: colors.accent,
-    fontSize: 14,
-    fontWeight: 600,
-    fontFamily: fonts.family,
-    cursor: "pointer",
-    padding: "4px",
-    transition: "color 0.2s",
+  registerHint: {
+    margin: 0,
+    color: colors.textMuted,
+    textAlign: "center",
+    fontSize: 13,
+    lineHeight: 1.5,
   },
 };
 

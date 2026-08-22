@@ -28,13 +28,45 @@ function authInterviewer(req, res, next) {
 
     const payload = verifyToken(token);
 
-    if (payload.role !== "interviewer") {
+    if (!["interviewer", "admin"].includes(payload.role)) {
       return res.status(403).json({
         message: "Interviewer access required",
       });
     }
 
     req.interviewer = payload;
+
+    next();
+  } catch (err) {
+    return res.status(401).json({
+      message: "Invalid or expired token",
+    });
+  }
+}
+
+function authAdmin(req, res, next) {
+  try {
+    const header = req.headers.authorization || "";
+
+    const token = header.startsWith("Bearer ")
+      ? header.slice(7)
+      : null;
+
+    if (!token) {
+      return res.status(401).json({
+        message: "Not authorized",
+      });
+    }
+
+    const payload = verifyToken(token);
+
+    if (payload.role !== "admin") {
+      return res.status(403).json({
+        message: "Admin access required",
+      });
+    }
+
+    req.admin = payload;
 
     next();
   } catch (err) {
@@ -80,5 +112,6 @@ module.exports = {
   signToken,
   verifyToken,
   authInterviewer,
+  authAdmin,
   authStudent,
 };

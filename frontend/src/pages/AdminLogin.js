@@ -11,58 +11,43 @@ import { setAuth } from "../api";
 import api from "../api";
 import { colors, fonts, gradients } from "../styles/theme";
 
-const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function InterviewerRegister({ setIsInterviewerLoggedIn }) {
+function AdminLogin({ setIsAdminLoggedIn }) {
   const navigate = useNavigate();
   const toast = useToast();
 
   const [username, setUsername] = useState("");
-  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const register = async () => {
-    if (username.trim().length < 3) {
-      toast.warning("Username must be at least 3 characters");
-      return;
-    }
-
-    if (!EMAIL_REGEX.test(email.trim())) {
-      toast.warning("Please enter a valid email address");
-      return;
-    }
-
-    if (password.length < 6) {
-      toast.warning("Password must be at least 6 characters");
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      toast.warning("Passwords do not match");
+  const loginAdmin = async () => {
+    if (!username || !password) {
+      toast.warning("Please enter username and password");
       return;
     }
 
     setLoading(true);
 
     try {
-      const response = await api.post("/api/interviewer/register", {
+      const response = await api.post("/api/interviewer-login", {
         username,
-        email,
         password,
       });
 
-      toast.success(response.data.message);
+      if (response.data.role !== "admin") {
+        toast.error("This account does not have admin access");
+        return;
+      }
 
-      setAuth("interviewer", response.data.token, response.data.username);
+      toast.success("Admin login successful");
 
-      setIsInterviewerLoggedIn(true);
+      setAuth("admin", response.data.token, response.data.username);
 
-      setTimeout(() => navigate("/dashboard"), 400);
+      setIsAdminLoggedIn(true);
+
+      setTimeout(() => navigate("/admin"), 400);
     } catch (error) {
       toast.error(
-        error.response?.data?.message || "Registration failed"
+        error.response?.data?.message || "Login failed"
       );
     } finally {
       setLoading(false);
@@ -70,7 +55,7 @@ function InterviewerRegister({ setIsInterviewerLoggedIn }) {
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === "Enter") register();
+    if (e.key === "Enter") loginAdmin();
   };
 
   return (
@@ -81,72 +66,54 @@ function InterviewerRegister({ setIsInterviewerLoggedIn }) {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4 }}
           style={styles.backLink}
-          onClick={() => navigate("/interviewer-login")}
+          onClick={() => navigate("/")}
         >
           ← Back
         </motion.div>
 
         <GlassCard style={styles.card}>
-          <div style={styles.icon}>📋</div>
+          <div style={styles.icon}>🛡️</div>
 
           <h1
             style={{
               ...styles.title,
-              background: gradients.accent,
+              background: gradients.text,
               WebkitBackgroundClip: "text",
               WebkitTextFillColor: "transparent",
             }}
           >
-            Interviewer Sign Up
+            Admin Login
           </h1>
 
           <p style={styles.subtitle}>
-            Create an account to manage students and receive interview reports
-            by email.
+            Restricted to administrators only.
           </p>
 
           <TextField
             label="Username"
-            placeholder="Enter username"
+            placeholder="Enter admin username"
             icon="👤"
             value={username}
             onChange={setUsername}
           />
 
           <TextField
-            label="Email (for report PDFs)"
-            placeholder="Enter email"
-            icon="📧"
-            value={email}
-            onChange={setEmail}
-          />
-
-          <TextField
             label="Password"
             type="password"
-            placeholder="At least 6 characters"
+            placeholder="Enter password"
             icon="🔒"
             value={password}
             onChange={setPassword}
-          />
-
-          <TextField
-            label="Confirm Password"
-            type="password"
-            placeholder="Re-enter password"
-            icon="🔒"
-            value={confirmPassword}
-            onChange={setConfirmPassword}
             onKeyDown={handleKeyDown}
           />
 
           <GradientButton
-            onClick={register}
+            onClick={loginAdmin}
             loading={loading}
-            gradient={gradients.accent}
+            gradient={gradients.text}
             style={{ width: "100%", marginTop: 6 }}
           >
-            {loading ? "Creating..." : "Create Account"}
+            {loading ? "Logging in..." : "Login"}
           </GradientButton>
         </GlassCard>
       </div>
@@ -206,4 +173,4 @@ const styles = {
   },
 };
 
-export default InterviewerRegister;
+export default AdminLogin;

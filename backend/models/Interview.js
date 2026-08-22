@@ -16,6 +16,14 @@ const interviewSchema = new mongoose.Schema({
     default: "",
   },
 
+  // Position of this question within its session (1-based) — lets the
+  // results view map answer rows back onto the exact questions even
+  // when rows are written milliseconds apart.
+  questionNumber: {
+    type: Number,
+    default: 0,
+  },
+
   subject: {
     type: String,
     required: true,

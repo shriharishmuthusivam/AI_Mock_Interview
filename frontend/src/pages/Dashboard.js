@@ -51,6 +51,9 @@ function Dashboard({ onLogout }) {
   const [interviews, setInterviews] =
     useState([]);
 
+  const [liveSessions, setLiveSessions] =
+    useState([]);
+
   const [loading, setLoading] =
     useState(true);
 
@@ -59,6 +62,8 @@ function Dashboard({ onLogout }) {
   const [sort, setSort] = useState("newest");
 
   const [classFilter, setClassFilter] = useState("");
+
+  const [typeFilter, setTypeFilter] = useState("");
 
   const [dateFrom, setDateFrom] = useState("");
 
@@ -73,12 +78,13 @@ function Dashboard({ onLogout }) {
     setLoading(true);
 
     try {
-      const response = await api.get(
-        "/api/interviews",
-        { authRole: "interviewer" }
-      );
+      const [interviewRes, liveRes] = await Promise.all([
+        api.get("/api/interviews", { authRole: "interviewer" }),
+        api.get("/api/live-sessions", { authRole: "interviewer" }),
+      ]);
 
-      setInterviews(response.data);
+      setInterviews(interviewRes.data);
+      setLiveSessions(liveRes.data);
     } catch (error) {
       console.log(error);
     } finally {
@@ -145,6 +151,7 @@ function Dashboard({ onLogout }) {
 
       return {
         key: rows[0].sessionId || "no-session",
+        source: "ai",
         studentUsername: rows[0].studentUsername,
         className: rows[0].className || "",
         createdAt: new Date(rows[0].createdAt),
@@ -160,10 +167,34 @@ function Dashboard({ onLogout }) {
     });
   }, [interviews]);
 
+  // Merge AI sessions with live sessions into one combined list
+  const allSessions = useMemo(() => {
+    const live = liveSessions
+      .filter((s) => s.status === "ended" || s.studentUsername)
+      .map((s) => ({
+        key: `live-${s.code}`,
+        source: "live",
+        studentUsername: s.studentUsername || "—",
+        className: s.className || "",
+        createdAt: new Date(s.createdAt),
+        questionCount: 0,
+        avgScore: s.score != null ? s.score : null,
+        totalScore: null,
+        violations: 0,
+        completed: s.status === "ended",
+        liveCode: s.code,
+        liveStatus: s.status,
+      }));
+
+    return [...sessions, ...live].sort(
+      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+    );
+  }, [sessions, liveSessions]);
+
   // A student only counts once, and only if they finished an
   // interview (i.e. a final score / report was generated).
   const stats = useMemo(() => {
-    const completed = sessions.filter((s) => s.completed);
+    const completed = allSessions.filter((s) => s.completed);
 
     const studentMap = new Map();
 
@@ -194,12 +225,12 @@ function Dashboard({ onLogout }) {
     ).size;
 
     return { total, avg, classes };
-  }, [sessions]);
+  }, [allSessions]);
 
   const distribution = useMemo(() => {
     const map = {};
 
-    sessions.forEach((s) => {
+    allSessions.forEach((s) => {
       if (!s.completed) return;
 
       const key = s.className || "Unassigned";
@@ -210,17 +241,21 @@ function Dashboard({ onLogout }) {
     return Object.entries(map).sort(
       (a, b) => b[1] - a[1]
     );
-  }, [sessions]);
+  }, [allSessions]);
 
   const trend = useMemo(
-    () => sessions.filter((s) => s.completed).slice(0, 10).reverse(),
-    [sessions]
+    () =>
+      allSessions
+        .filter((s) => s.completed && s.avgScore != null)
+        .slice(0, 10)
+        .reverse(),
+    [allSessions]
   );
 
   const rows = useMemo(() => {
     const q = query.toLowerCase();
 
-    let list = sessions.filter((s) => {
+    let list = allSessions.filter((s) => {
       const matchesQuery =
         !q ||
         s.studentUsername.toLowerCase().includes(q) ||
@@ -242,15 +277,19 @@ function Dashboard({ onLogout }) {
 
       const matchesTo = !dateTo || day <= dateTo;
 
+      const matchesType =
+        !typeFilter ||
+        (typeFilter === "live" ? s.source === "live" : s.source === "ai");
+
       return (
-        matchesQuery && matchesClass && matchesFrom && matchesTo
+        matchesQuery && matchesClass && matchesFrom && matchesTo && matchesType
       );
     });
 
     if (sort === "high") {
-      list = [...list].sort((a, b) => b.avgScore - a.avgScore);
+      list = [...list].sort((a, b) => (b.avgScore ?? -1) - (a.avgScore ?? -1));
     } else if (sort === "low") {
-      list = [...list].sort((a, b) => a.avgScore - b.avgScore);
+      list = [...list].sort((a, b) => (a.avgScore ?? 11) - (b.avgScore ?? 11));
     } else {
       list = [...list].sort(
         (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
@@ -258,7 +297,7 @@ function Dashboard({ onLogout }) {
     }
 
     return list;
-  }, [sessions, query, sort, classFilter, dateFrom, dateTo]);
+  }, [allSessions, query, sort, classFilter, typeFilter, dateFrom, dateTo]);
 
   const maxDist =
     distribution.length > 0
@@ -428,7 +467,7 @@ function Dashboard({ onLogout }) {
                   </span>
 
                   <span style={styles.trendScore}>
-                    {item.avgScore.toFixed(1)}
+                    {item.avgScore != null ? item.avgScore.toFixed(1) : "—"}
                   </span>
                 </div>
               );
@@ -469,6 +508,16 @@ function Dashboard({ onLogout }) {
             <option value="unassigned">Unassigned</option>
           </select>
 
+          <select
+            value={typeFilter}
+            onChange={(e) => setTypeFilter(e.target.value)}
+            style={styles.select}
+          >
+            <option value="">All types</option>
+            <option value="ai">AI Interview</option>
+            <option value="live">Live</option>
+          </select>
+
           <input
             type="date"
             value={dateFrom}
@@ -504,9 +553,9 @@ function Dashboard({ onLogout }) {
           </div>
         ) : rows.length === 0 ? (
           <p style={styles.emptyState}>
-            {query || classFilter || dateFrom || dateTo
+            {query || classFilter || typeFilter || dateFrom || dateTo
               ? "No interviews match your filters."
-              : "No interviews recorded yet. Ask a student to take an interview."}
+              : "No interviews recorded yet. Ask a student to take an AI or live interview."}
           </p>
         ) : (
           <div style={styles.tableScroll}>
@@ -514,6 +563,7 @@ function Dashboard({ onLogout }) {
               <thead>
                 <tr>
                   <th>Student</th>
+                  <th>Type</th>
                   <th>Class</th>
                   <th>Date</th>
                   <th>Questions</th>
@@ -545,6 +595,29 @@ function Dashboard({ onLogout }) {
                     </td>
 
                     <td style={styles.td}>
+                      <span
+                        style={{
+                          ...styles.subjectTag,
+                          background:
+                            item.source === "live"
+                              ? "rgba(34,197,94,0.15)"
+                              : "rgba(59,130,246,0.15)",
+                          color:
+                            item.source === "live"
+                              ? "#4ade80"
+                              : "#60a5fa",
+                          border: `1px solid ${
+                            item.source === "live"
+                              ? "rgba(34,197,94,0.4)"
+                              : "rgba(59,130,246,0.4)"
+                          }`,
+                        }}
+                      >
+                        {item.source === "live" ? "Live" : "AI"}
+                      </span>
+                    </td>
+
+                    <td style={styles.td}>
                       <span style={styles.subjectTag}>
                         {item.className || "Unassigned"}
                       </span>
@@ -563,31 +636,39 @@ function Dashboard({ onLogout }) {
                     </td>
 
                     <td style={styles.td}>
-                      <span
-                        style={{
-                          ...styles.scoreBadge,
-                          background:
-                            item.avgScore >= 7
-                              ? "rgba(34,197,94,0.15)"
-                              : "rgba(239,68,68,0.15)",
-                          color:
-                            item.avgScore >= 7
-                              ? "#4ade80"
-                              : "#f87171",
-                          border: `1px solid ${
-                            item.avgScore >= 7
-                              ? "rgba(34,197,94,0.4)"
-                              : "rgba(239,68,68,0.4)"
-                          }`,
-                        }}
-                      >
-                        {item.avgScore.toFixed(1)}/10
-                      </span>
+                      {item.avgScore != null ? (
+                        <span
+                          style={{
+                            ...styles.scoreBadge,
+                            background:
+                              item.avgScore >= 7
+                                ? "rgba(34,197,94,0.15)"
+                                : "rgba(239,68,68,0.15)",
+                            color:
+                              item.avgScore >= 7
+                                ? "#4ade80"
+                                : "#f87171",
+                            border: `1px solid ${
+                              item.avgScore >= 7
+                                ? "rgba(34,197,94,0.4)"
+                                : "rgba(239,68,68,0.4)"
+                            }`,
+                          }}
+                        >
+                          {item.avgScore.toFixed(1)}/10
+                        </span>
+                      ) : (
+                        <span style={{ ...styles.feedback, color: "#94a3b8" }}>
+                          Unscored
+                        </span>
+                      )}
                     </td>
 
                     <td style={styles.td}>
                       <span style={styles.feedback}>
-                        {item.totalScore}/{item.questionCount * 10}
+                        {item.totalScore != null
+                          ? `${item.totalScore}/${item.questionCount * 10}`
+                          : "—"}
                       </span>
                     </td>
 
@@ -923,7 +1004,7 @@ const styles = {
   table: {
     width: "100%",
     borderCollapse: "collapse",
-    minWidth: 860,
+    minWidth: 960,
   },
 
   row: {

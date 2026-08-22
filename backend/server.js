@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const axios = require("axios");
@@ -10,6 +12,7 @@ const Student = require("./models/Student");
 const Interview = require("./models/Interview");
 const Interviewer = require("./models/Interviewer");
 const Syllabus = require("./models/Syllabus");
+const QuestionSet = require("./models/QuestionSet");
 const LiveSession = require("./models/LiveSession");
 
 const multer = require("multer");
@@ -19,12 +22,18 @@ const {
   signToken,
   verifyToken,
   authInterviewer,
+  authAdmin,
   authStudent,
 } = require("./middleware/auth");
 const { notFound, errorHandler } = require("./middleware/error");
 const { buildPdf, sendReportEmail } = require("./services/report");
+const { completeChat } = require("./services/aiProvider");
 
-require("dotenv").config();
+if (!process.env.GROQ_API_KEY && !process.env.GEMINI_API_KEY) {
+  console.warn(
+    "WARNING: No AI provider configured. Set GROQ_API_KEY or GEMINI_API_KEY in backend/.env and restart the server, or every interview will fail to start."
+  );
+}
 
 // MongoDB Connection
 mongoose
@@ -54,6 +63,11 @@ app.use(
 app.use(express.json());
 
 app.use(helmet());
+
+// Health check for Render / uptime monitors
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", uptime: process.uptime() });
+});
 
 // Basic validation helpers
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -140,10 +154,6 @@ const authLimiter = rateLimit({
 // Token-budget limits for the Groq prompt. The free Groq tier is capped at
 // 6000 tokens/minute, so keep the whole request well under that.
 const MAX_SYLLABUS_CHARS = 4000;
-const MAX_EXCLUSIONS = 10;
-const MAX_EXCLUSION_CHARS = 120;
-const MAX_HISTORY_MESSAGES = 6;
-const MAX_MESSAGE_CHARS = 300;
 
 // Supported academic classes (order = difficulty progression)
 const CLASSES = [
@@ -165,71 +175,6 @@ app.get("/", (req, res) => {
     "AI Mock Interviewer Backend Running"
   );
 });
-
-//
-// INTERVIEWER REGISTER
-//
-app.post(
-  "/api/interviewer/register",
-  authLimiter,
-  async (req, res) => {
-    try {
-      const { username, password, email } = req.body;
-
-      const credError = validateCredentials(username, password);
-
-      if (credError) {
-        return res.status(400).json({
-          message: credError,
-        });
-      }
-
-      if (!email || !EMAIL_REGEX.test(email)) {
-        return res.status(400).json({
-          message: "A valid email address is required",
-        });
-      }
-
-      const existing = await Interviewer.findOne({
-        username: username.trim(),
-      });
-
-      if (existing) {
-        return res.status(400).json({
-          message: "Interviewer already exists",
-        });
-      }
-
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      const newInterviewer = new Interviewer({
-        username: username.trim(),
-        password: hashedPassword,
-        email: email.trim().toLowerCase(),
-      });
-
-      await newInterviewer.save();
-
-      const token = signToken({
-        username: newInterviewer.username,
-        role: "interviewer",
-      });
-
-      res.json({
-        message: "Interviewer registered successfully",
-        token,
-        username: newInterviewer.username,
-        email: newInterviewer.email,
-      });
-    } catch (error) {
-      console.log(error);
-
-      res.status(500).json({
-        message: "Server error",
-      });
-    }
-  }
-);
 
 //
 // INTERVIEWER LOGIN
@@ -261,7 +206,7 @@ app.post(
 
       const token = signToken({
         username: interviewer.username,
-        role: "interviewer",
+        role: interviewer.role || "interviewer",
       });
 
       res.json({
@@ -269,6 +214,7 @@ app.post(
         token,
         username: interviewer.username,
         email: interviewer.email,
+        role: interviewer.role || "interviewer",
       });
     } catch (error) {
       console.log(error);
@@ -368,6 +314,7 @@ app.post(
 
           if (password) {
             existing.password = await bcrypt.hash(password, 10);
+            existing.plainPassword = password;
           }
 
           await existing.save();
@@ -383,6 +330,7 @@ app.post(
           const newStudent = new Student({
             username: dno,
             password: hashedPassword,
+            plainPassword: password,
             name,
             className: rowClass,
             createdBy: req.interviewer.username,
@@ -454,6 +402,7 @@ app.post(
       const newStudent = new Student({
         username: dno,
         password: hashedPassword,
+        plainPassword: pass,
         name: String(name || "").trim(),
         className,
         createdBy: req.interviewer.username,
@@ -623,27 +572,57 @@ app.post(
         });
       }
 
+      const trimmed = String(syllabus).trim();
+
       const existing = await Syllabus.findOne({ className });
 
+      const syllabusChanged =
+        !existing || existing.syllabus !== trimmed;
+
+      const countChanged =
+        !existing || existing.questionCount !== count;
+
       if (existing) {
-        existing.syllabus = String(syllabus).trim();
+        existing.syllabus = trimmed;
         existing.questionCount = count;
         existing.updatedAt = Date.now();
         await existing.save();
       } else {
         const newSyllabus = new Syllabus({
           className,
-          syllabus: String(syllabus).trim(),
+          syllabus: trimmed,
           questionCount: count,
         });
 
         await newSyllabus.save();
       }
 
+      // A verified question set is tied to the exact syllabus and
+      // question count it was generated from — any change invalidates
+      // it back to Draft so the interviewer must re-verify.
+      let invalidatedSet = false;
+
+      if (syllabusChanged || countChanged) {
+        const result = await QuestionSet.updateMany(
+          { className, status: "verified" },
+          {
+            $set: {
+              status: "draft",
+              verifiedAt: null,
+              verifiedBy: "",
+              updatedAt: Date.now(),
+            },
+          }
+        );
+
+        invalidatedSet = result.modifiedCount > 0;
+      }
+
       res.json({
         message: "Syllabus saved",
         className,
         questionCount: count,
+        questionsInvalidated: invalidatedSet,
       });
     } catch (error) {
       console.log(error);
@@ -694,10 +673,418 @@ app.get(
 
       const doc = await Syllabus.findOne({ className });
 
+      const questionSet = await QuestionSet.findOne({ className });
+
       res.json({
         className,
         configured: !!doc,
         questionCount: doc ? doc.questionCount : 0,
+        verified: !!questionSet && questionSet.status === "verified",
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// GENERATE QUESTION POOL FROM SYLLABUS (interviewer)
+//
+const MAX_POOL_SIZE = 60;
+
+app.post(
+  "/api/questions/generate",
+  authInterviewer,
+  async (req, res) => {
+    try {
+      const { className } = req.body;
+
+      if (!CLASSES.includes(className)) {
+        return res.status(400).json({
+          message: "Please choose a valid class",
+        });
+      }
+
+      const syllabusDoc = await Syllabus.findOne({ className });
+
+      if (!syllabusDoc || !syllabusDoc.syllabus) {
+        return res.status(400).json({
+          message:
+            "Save the syllabus for this class first, then generate questions",
+        });
+      }
+
+      const count = syllabusDoc.questionCount || 20;
+
+      const poolSize = Math.min(count * 3, MAX_POOL_SIZE);
+
+      const syllabusContext = syllabusDoc.syllabus
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, MAX_SYLLABUS_CHARS);
+
+      const response = await completeChat({
+        messages: [
+          {
+            role: "system",
+            content:
+              `You are a professional technical interviewer preparing a MULTIPLE-CHOICE question bank for computer science students.\n\n` +
+              `The students are in class: ${className}. ${difficultyNote(className)}\n\n` +
+              `Every question MUST be based on this college syllabus:\n\n` +
+              `<SYLLABUS>\n${syllabusContext}\n</SYLLABUS>\n\n` +
+              `Rules:\n` +
+              `- Produce exactly ${poolSize} DISTINCT multiple-choice interview questions\n` +
+              `- Each question must be ONE short sentence of at most 20 words\n` +
+              `- Each question has EXACTLY FOUR options — mutually exclusive, similar length, with only ONE clearly correct choice\n` +
+              `- Distractors must be believable common mistakes from the same topic — never jokes, "none of the above", or obviously wrong filler\n` +
+              `- Spread the questions across DIFFERENT topics in the syllabus — do not ask several questions about the same narrow topic\n` +
+              `- Difficulty split: about one third EASY, one third MEDIUM, one third HARD\n` +
+              `- easy = direct recall or definitions of a single concept; medium = applying or comparing concepts; hard = analysis, scenarios or multi-step reasoning\n` +
+              `- Every line MUST follow this exact format (the | separators are mandatory):\n` +
+              `  N. The interview question? | option A ; option B ; option C ; option D | correct=B | expected point one; expected point two; expected point three | medium\n` +
+              `- The correct= field is the capital letter (A, B, C, or D) of the single right option\n` +
+              `- Expected points: exactly 3 short key concepts a student should know for this question, each at most 8 words, separated by "; "\n` +
+              `- Difficulty: the last field is exactly one word — easy, medium, or hard\n` +
+              `- NEVER use the | character inside a question, option, or point\n` +
+              `- No preamble, no headings — output ONLY the numbered list`,
+          },
+          {
+            role: "user",
+            content: `Generate all ${poolSize} questions now in the exact format.`,
+          },
+        ],
+        temperature: 0.9,
+        maxTokens: 6000,
+      });
+
+      const raw = response.data.choices[0].message.content;
+
+      // Extract numbered-list entries as MCQ objects
+      // {text, options[4], correctIndex, expectedPoints, difficulty};
+      // dedupe by text. Malformed lines are skipped.
+      const seen = new Set();
+
+      const questions = [];
+
+      for (const line of String(raw || "").split(/\r?\n/)) {
+        const match = line.match(/^\s*\d+\s*[\.\)]\s*(.+)$/);
+
+        if (!match) continue;
+
+        const parts = match[1].split("|");
+
+        const text = parts[0]
+          .replace(/^["'\u201C\u201D]+|["'\u201C\u201D]+$/g, "")
+          .trim();
+
+        // Four answer options separated by ";"
+        const options = (parts[1] || "")
+          .split(";")
+          .map((o) =>
+            o
+              .replace(/^["'\u201C\u201D]+|["'\u201C\u201D]+$/g, "")
+              .trim()
+          )
+          .filter(Boolean)
+          .slice(0, 4);
+
+        // Correct answer as a capital letter A-D -> zero-based index
+        const rawCorrect = (parts[2] || "")
+          .replace(/^\s*correct\s*(answer)?\s*[:=]?\s*/i, "")
+          .trim()
+          .toUpperCase()
+          .slice(0, 1);
+
+        const correctIndex = /^[A-D]$/.test(rawCorrect)
+          ? rawCorrect.charCodeAt(0) - 65
+          : -1;
+
+        const points = (parts[3] || "")
+          .replace(/^\s*expected( answer)? points?\s*:\s*/i, "")
+          .replace(/[.。]+\s*$/, "")
+          .trim();
+
+        const rawLevel = (parts[4] || "")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z]/g, "");
+
+        const difficulty = [
+          "easy",
+          "medium",
+          "hard",
+        ].includes(rawLevel)
+          ? rawLevel
+          : "medium";
+
+        const key = text.toLowerCase();
+
+        if (
+          text &&
+          text.length >= 8 &&
+          text.length <= 200 &&
+          options.length === 4 &&
+          correctIndex >= 0 &&
+          !seen.has(key)
+        ) {
+          seen.add(key);
+
+          questions.push({
+            text,
+            options,
+            correctIndex,
+            expectedPoints: points.slice(0, 300),
+            difficulty,
+          });
+        }
+      }
+
+      const withPoints = questions.filter(
+        (q) => q.expectedPoints
+      ).length;
+
+      const levelCounts = questions.reduce(
+        (acc, q) => {
+          acc[q.difficulty] += 1;
+          return acc;
+        },
+        { easy: 0, medium: 0, hard: 0 }
+      );
+
+      console.log(
+        `[questions] generated ${questions.length} entries ` +
+          `(${withPoints} with points) [easy:${levelCounts.easy} medium:${levelCounts.medium} hard:${levelCounts.hard}] for ${className}`
+      );
+
+      if (questions.length < count) {
+        return res.status(502).json({
+          message:
+            "The AI did not produce enough valid questions. Please try generating again.",
+        });
+      }
+
+      let set = await QuestionSet.findOne({ className });
+
+      if (!set) {
+        set = new QuestionSet({ className });
+      }
+
+      set.questions = questions;
+      set.status = "draft";
+      set.questionCount = count;
+      set.generatedBy = req.interviewer.username;
+      set.updatedAt = Date.now();
+
+      await set.save();
+
+      res.json({
+        className,
+        status: set.status,
+        questionCount: count,
+        questions,
+      });
+    } catch (error) {
+      console.log("QUESTION GENERATION ERROR");
+      console.log(error);
+
+      const status = error.response?.status;
+
+      const allProvidersBusy =
+        status === 429 ||
+        /rate limit/i.test(
+          error.response?.data?.error?.message || ""
+        );
+
+      res.status(status === 429 || allProvidersBusy ? 429 : 500).json({
+        message: allProvidersBusy
+          ? "The AI service is busy right now. Wait a moment and try again."
+          : "Failed to generate questions. Check that the AI service is configured on the server.",
+      });
+    }
+  }
+);
+
+//
+// VERIFY + PUBLISH A QUESTION POOL (interviewer)
+//
+app.post(
+  "/api/questions/verify",
+  authInterviewer,
+  async (req, res) => {
+    try {
+      const { className, questions } = req.body;
+
+      if (!CLASSES.includes(className)) {
+        return res.status(400).json({
+          message: "Please choose a valid class",
+        });
+      }
+
+      const syllabusDoc = await Syllabus.findOne({ className });
+
+      if (!syllabusDoc) {
+        return res.status(400).json({
+          message: "Save the syllabus first",
+        });
+      }
+
+      const count = syllabusDoc.questionCount || 20;
+
+      if (!Array.isArray(questions)) {
+        return res.status(400).json({
+          message: "Questions must be a list",
+        });
+      }
+
+      const cleaned = [];
+
+      const seen = new Set();
+
+      for (const item of questions) {
+        // Accept both plain strings (legacy clients) and
+        // {text, expectedPoints} objects
+        const text = String(
+          typeof item === "object" && item !== null
+            ? item.text
+            : item || ""
+        ).trim();
+
+        const expectedPoints =
+          typeof item === "object" && item !== null
+            ? String(item.expectedPoints || "")
+                .trim()
+                .slice(0, 300)
+            : "";
+
+        const rawLevel =
+          typeof item === "object" && item !== null
+            ? String(item.difficulty || "")
+                .trim()
+                .toLowerCase()
+            : "";
+
+        // Difficulty is AI-assigned; the interviewer cannot edit it,
+        // but we still whitelist whatever arrives.
+        const difficulty = [
+          "easy",
+          "medium",
+          "hard",
+        ].includes(rawLevel)
+          ? rawLevel
+          : "medium";
+
+        // MCQ options + correct answer index. A question without a
+        // complete four-option set cannot be served in the MCQ
+        // interview, so it is dropped here.
+        const rawOptions =
+          typeof item === "object" && item !== null &&
+          Array.isArray(item.options)
+            ? item.options.map((o) => String(o || "").trim())
+            : [];
+
+        const options = rawOptions
+          .filter(Boolean)
+          .map((o) => o.slice(0, 200));
+
+        const correctIndexRaw =
+          typeof item === "object" && item !== null
+            ? Number(item.correctIndex)
+            : NaN;
+
+        const correctIndex =
+          Number.isInteger(correctIndexRaw) &&
+          correctIndexRaw >= 0 &&
+          correctIndexRaw <= 3
+            ? correctIndexRaw
+            : -1;
+
+        const key = text.toLowerCase();
+
+        if (
+          text &&
+          options.length === 4 &&
+          correctIndex >= 0 &&
+          !seen.has(key)
+        ) {
+          seen.add(key);
+
+          cleaned.push({
+            text: text.slice(0, 300),
+            expectedPoints,
+            options,
+            correctIndex,
+            difficulty,
+          });
+        }
+      }
+
+      if (cleaned.length < count) {
+        return res.status(400).json({
+          message: `At least ${count} unique, complete multiple-choice questions are required to verify (currently ${cleaned.length}). Every question needs exactly four non-empty options and a selected correct answer.`,
+        });
+      }
+
+      let set = await QuestionSet.findOne({ className });
+
+      if (!set) {
+        set = new QuestionSet({ className });
+      }
+
+      set.questions = cleaned;
+      set.status = "verified";
+      set.questionCount = count;
+      set.verifiedBy = req.interviewer.username;
+      set.verifiedAt = Date.now();
+      set.updatedAt = Date.now();
+
+      await set.save();
+
+      res.json({
+        className,
+        status: set.status,
+        questionCount: count,
+        total: cleaned.length,
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// GET CURRENT QUESTION POOL STATUS (interviewer)
+//
+app.get(
+  "/api/questions/:className",
+  authInterviewer,
+  async (req, res) => {
+    try {
+      const className = req.params.className;
+
+      if (!CLASSES.includes(className)) {
+        return res.status(400).json({
+          message: "Invalid class",
+        });
+      }
+
+      const set = await QuestionSet.findOne({ className });
+
+      res.json({
+        className,
+        status: set ? set.status : "none",
+        questionCount: set ? set.questionCount : 0,
+        questions: set ? normalizedQuestionPool(set) : [],
+        verifiedBy: set ? set.verifiedBy : "",
+        verifiedAt: set ? set.verifiedAt : null,
+        updatedAt: set ? set.updatedAt : null,
       });
     } catch (error) {
       console.log(error);
@@ -782,31 +1169,6 @@ app.get(
   }
 );
 
-//
-// Extract score (0-10) and feedback from the AI reply
-//
-function parseReply(reply) {
-  let score = 0;
-
-  const scoreMatch = reply.match(/Score:\s*(\d+)/i);
-
-  if (scoreMatch) {
-    score = Math.max(0, Math.min(10, Number(scoreMatch[1])));
-  }
-
-  let feedback = "";
-
-  const feedbackMatch = reply.match(
-    /Feedback:\s*([\s\S]*?)(?:\n\s*Next Question:|\n\s*Question:)?\s*$/i
-  );
-
-  if (feedbackMatch && feedbackMatch[1] && feedbackMatch[1].trim()) {
-    feedback = feedbackMatch[1].trim();
-  }
-
-  return { score, feedback };
-}
-
 // Difficulty guidance based on where the class sits in the academic order
 function difficultyNote(className) {
   const index = CLASSES.indexOf(className);
@@ -826,8 +1188,190 @@ function difficultyNote(className) {
   return "This is an advanced postgraduate class. Questions should be challenging, applied and research-adjacent.";
 }
 
+// FNV-1a string hash -> 32-bit unsigned seed
+function hashSeed(str) {
+  let h = 2166136261;
+
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+
+    h = Math.imul(h, 16777619);
+  }
+
+  return h >>> 0;
+}
+
+// Small deterministic PRNG so a session's question subset stays
+// identical across every turn without server-side session state.
+function mulberry32(seed) {
+  let a = seed;
+
+  return function () {
+    a |= 0;
+
+    a = (a + 0x6d2b79f5) | 0;
+
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Ordered subset of the verified pool, stable per sessionId. The
+// count splits ~⅓ across easy/medium/hard and is served easy →
+// medium → hard so every interview warms up before it bites.
+function pickSessionQuestions(pool, sessionId, count) {
+  const rand = mulberry32(hashSeed(String(sessionId || "")));
+
+  const shuffled = (arr) => {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+
+    return arr;
+  };
+
+  const buckets = { easy: [], medium: [], hard: [] };
+
+  pool.forEach((q, i) => {
+    const level =
+      q.difficulty === "easy" || q.difficulty === "hard"
+        ? q.difficulty
+        : "medium";
+
+    buckets[level].push(i);
+  });
+
+  Object.values(buckets).forEach((b) => shuffled(b));
+
+  const base = Math.floor(count / 3);
+
+  let remainder = count - base * 3;
+
+  const quota = { easy: base, medium: base, hard: base };
+
+  ["easy", "medium", "hard"].forEach((level) => {
+    if (remainder > 0) {
+      quota[level] += 1;
+
+      remainder -= 1;
+    }
+  });
+
+  const used = new Set();
+
+  const selected = [];
+
+  const take = (level, n) => {
+    let taken = 0;
+
+    for (const i of buckets[level]) {
+      if (taken >= n || selected.length >= count) break;
+
+      used.add(i);
+
+      selected.push(pool[i]);
+
+      taken += 1;
+    }
+  };
+
+  take("easy", quota.easy);
+
+  take("medium", quota.medium);
+
+  take("hard", quota.hard);
+
+  // Shortfalls from thin buckets top up from whatever remains,
+  // preserving the seeded randomness.
+  if (selected.length < count) {
+    const rest = shuffled(
+      pool.map((_, i) => i).filter((i) => !used.has(i))
+    );
+
+    for (const i of rest) {
+      if (selected.length >= count) break;
+
+      selected.push(pool[i]);
+    }
+  }
+
+  return selected.slice(0, count);
+}
+
+// Tolerate legacy pools where questions were stored as plain
+// strings — every downstream consumer gets one shape. `mcqReady`
+// marks whether the entry can be served in the multiple-choice
+// interview (four options + a valid correct index).
+function normalizedQuestionPool(setDoc) {
+  return (Array.isArray(setDoc.questions) ? setDoc.questions : [])
+    .map((q) => {
+      const base =
+        typeof q === "string"
+          ? {
+              text: q,
+              expectedPoints: "",
+              options: [],
+              correctIndex: -1,
+              difficulty: "medium",
+            }
+          : {
+              text: String(q.text || ""),
+              expectedPoints: String(q.expectedPoints || ""),
+              options: Array.isArray(q.options)
+                ? q.options.map((o) => String(o || "").trim())
+                : [],
+              correctIndex: Number.isInteger(q.correctIndex)
+                ? q.correctIndex
+                : -1,
+              difficulty: ["easy", "hard", "medium"].includes(
+                String(q.difficulty)
+              )
+                ? String(q.difficulty)
+                : "medium",
+            };
+
+      return {
+        ...base,
+        mcqReady:
+          base.text.length > 0 &&
+          base.options.length === 4 &&
+          base.correctIndex >= 0 &&
+          base.correctIndex <= 3 &&
+          base.options.every(Boolean),
+      };
+    })
+    .filter((q) => q.text);
+}
+
+// Deterministic per-session option shuffle. Stable within a session,
+// different across sessions — so a screenshot of one student's screen
+// doesn't reveal where the correct answer sits in another session.
+function shuffledOptionsForSession(entry, sessionId, questionIndex) {
+  const rand = mulberry32(
+    hashSeed(`${String(sessionId || "")}::q${questionIndex}`)
+  );
+
+  const order = [0, 1, 2, 3];
+
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+
+  return {
+    options: order.map((i) => entry.options[i]),
+    correctIndex: order.indexOf(entry.correctIndex),
+  };
+}
+
 //
-// AI CHAT + SAVE INTERVIEW (class syllabus based common interview)
+// MCQ INTERVIEW (class syllabus based common interview)
 //
 app.post(
   "/api/chat",
@@ -836,15 +1380,24 @@ app.post(
   async (req, res) => {
     try {
       const {
-        message,
         sessionId,
-        question,
-        violationCount,
-        transcript,
         start,
+        finish,
+        pickedIndex,
+        violationCount,
         questionCount,
         questionIndex,
       } = req.body;
+
+      if (
+        !sessionId ||
+        typeof sessionId !== "string" ||
+        sessionId.length > 100
+      ) {
+        return res.status(400).json({
+          message: "Session id is required",
+        });
+      }
 
       const studentUsername = req.student.username;
 
@@ -874,231 +1427,291 @@ app.post(
         });
       }
 
-      const syllabus = syllabusDoc.syllabus;
+      // Questions are only served from a verified pool that the
+      // interviewer approved in Setup.
+      const questionSetDoc = await QuestionSet.findOne({ className });
 
-      // Recently asked questions in this class (from other sessions)
-      // so the AI does not repeat questions between students.
-      const recent = await Interview.find({
-        className,
-        question: { $ne: "" },
-      })
-        .sort({ createdAt: -1 })
-        .limit(40);
-
-      const exclusions = [
-        ...new Set(
-          recent
-            .filter((item) => item.sessionId !== sessionId)
-            .map((item) => String(item.question || "").trim())
-            .filter(Boolean)
-        ),
-      ]
-        .slice(0, MAX_EXCLUSIONS)
-        .map((q) =>
-          q.length > MAX_EXCLUSION_CHARS
-            ? q.slice(0, MAX_EXCLUSION_CHARS)
-            : q
-        );
-
-      const history = Array.isArray(transcript)
-        ? transcript
-            .filter(
-              (m) =>
-                m &&
-                typeof m.content === "string" &&
-                (m.role === "user" || m.role === "assistant")
-            )
-            .slice(-MAX_HISTORY_MESSAGES)
-            .map((m) => ({
-              role: m.role,
-              content:
-                m.content.length > MAX_MESSAGE_CHARS
-                  ? m.content.slice(0, MAX_MESSAGE_CHARS)
-                  : m.content,
-            }))
-        : [];
-
-      const totalCount = Number(questionCount) || syllabusDoc.questionCount;
-
-      const currentIndex = Number(questionIndex) || 0;
-
-      const remaining = totalCount - currentIndex;
-
-      // Normalize whitespace and cap the syllabus so the whole Groq request
-      // stays within the provider's token-per-minute limit.
-      const syllabusContext = syllabus
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, MAX_SYLLABUS_CHARS);
-
-      const baseSystem =
-        `You are a professional technical interviewer for computer science students.\n\n` +
-        `The student is in class: ${className}. ${difficultyNote(className)}\n\n` +
-        `Every question MUST be based on the college syllabus below:\n\n` +
-        `<SYLLABUS>\n${syllabusContext}\n</SYLLABUS>\n\n` +
-        `Rules:\n` +
-        `- Ask only ONE question at a time\n` +
-        `- Questions must come from the syllabus topics\n` +
-        `- Do not repeat any question you already asked in this interview\n` +
-        (exclusions.length > 0
-          ? `- Do not ask questions that other students have already received. Avoid: ${exclusions.join(
-              " | "
-            )}\n`
-          : "") +
-        `- Maintain a professional interview tone\n` +
-        `- Do not act like a casual chatbot\n` +
-        `- Keep responses concise and interview-oriented`;
-
-      let aiMessages;
-      let isStart = Boolean(start);
-
-      if (isStart) {
-        aiMessages = [
-          {
-            role: "system",
-            content:
-              baseSystem +
-              `\n\nYour first task: ask the FIRST interview question based on the syllabus. ` +
-              `Output ONLY the question text with no score, no feedback and no labels.`,
-          },
-          {
-            role: "user",
-            content: message || "Begin the interview.",
-          },
-        ];
-      } else {
-        const finalQuestion = remaining <= 0;
-
-        aiMessages = [
-          {
-            role: "system",
-            content:
-              baseSystem +
-              (finalQuestion
-                ? `\n\nThis is the FINAL question. Evaluate the answer and give Score and Feedback only. Do NOT ask a next question.`
-                : `\n\nFor every student answer:\n1. Evaluate the answer professionally\n2. Give a score out of 10\n3. Give short feedback\n4. Mention missing points if necessary\n5. Ask the next interview question based on the syllabus\n\nResponse format:\n\nScore: x/10\n\nFeedback:\n...\n\nNext Question:\n...`),
-          },
-          ...history,
-          {
-            role: "user",
-            content: message,
-          },
-        ];
-      }
-
-      const response = await axios.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {
-          model: "llama-3.1-8b-instant",
-          messages: aiMessages,
-          temperature: 0.8,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      let reply = response.data.choices[0].message.content;
-
-      if (isStart) {
-        reply = reply.replace(/^Question\s*:\s*/i, "").trim();
-
-        return res.json({
-          reply,
-          start: true,
+      if (
+        !questionSetDoc ||
+        questionSetDoc.status !== "verified" ||
+        !Array.isArray(questionSetDoc.questions) ||
+        questionSetDoc.questions.length === 0
+      ) {
+        return res.status(400).json({
+          message:
+            "Your interviewer has not verified the interview questions for your class yet. Please check back later.",
         });
       }
 
-      const { score, feedback } = parseReply(reply);
+      const pool = normalizedQuestionPool(questionSetDoc);
 
-      // The AI is told to always ask the next question, but if it forgets,
-      // generate one ourselves so the interview always reaches the
-      // configured question count.
-      if (!finalQuestion && !/Next Question:/i.test(reply)) {
-        try {
-          const nextResponse = await axios.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            {
-              model: "llama-3.1-8b-instant",
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    baseSystem +
-                    `\n\nYour task: ask the NEXT interview question based on the syllabus. ` +
-                    `Output ONLY the question text with no score, no feedback and no labels.`,
-                },
-                {
-                  role: "user",
-                  content: "Ask the next interview question.",
-                },
-              ],
-              temperature: 0.8,
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-                "Content-Type": "application/json",
-              },
-            }
-          );
-
-          const nextQuestion = String(
-            nextResponse.data.choices[0].message.content || ""
-          )
-            .replace(/^Question\s*:\s*/i, "")
-            .trim();
-
-          if (nextQuestion) {
-            reply = `${reply}\n\nNext Question:\n${nextQuestion}`;
-          }
-        } catch (genError) {
-          console.log("FAILED TO GENERATE NEXT QUESTION");
-          console.log(genError.response?.status || genError.message);
-        }
+      // Pools generated before the MCQ conversion carry no options —
+      // they cannot be served and must be regenerated by the interviewer.
+      if (!pool.every((q) => q.mcqReady)) {
+        return res.status(400).json({
+          message:
+            "Your interviewer's question set predates the new multiple-choice format. Please ask them to regenerate and re-verify the questions.",
+        });
       }
 
-      // Save this question/answer row
+      const totalCount = Math.min(
+        Number(questionCount) ||
+          syllabusDoc.questionCount ||
+          questionSetDoc.questionCount,
+        pool.length
+      );
+
+      // The whole session paper is recomputed deterministically from the
+      // sessionId on every request — no server-side session state, and a
+      // tampered client cannot steer grading elsewhere. Option order is
+      // shuffled per session so screenshots don't leak a fixed key.
+      const paper = pickSessionQuestions(pool, sessionId, totalCount).map(
+        (entry, i) => ({
+          ...entry,
+          ...shuffledOptionsForSession(entry, sessionId, i + 1),
+        })
+      );
+
+      if (paper.length === 0) {
+        return res.status(400).json({
+          message: "No verified questions available for your class",
+        });
+      }
+
+      const toPublicQuestion = (entry) => ({
+        text: entry.text,
+        difficulty: entry.difficulty,
+        options: entry.options,
+      });
+
+      //
+      // START — serve the first question WITHOUT the answer key
+      //
+      if (Boolean(start)) {
+        return res.json({
+          start: true,
+          total: paper.length,
+          question: { index: 1, ...toPublicQuestion(paper[0]) },
+        });
+      }
+
+      //
+      // FINISH — aggregate the saved answer rows, score deterministically,
+      // then ONE cheap AI call writes a short personalized summary
+      // (with a static fallback so results never depend on AI uptime).
+      //
+      if (Boolean(finish)) {
+        const rows = await Interview.find({
+          studentUsername,
+          sessionId,
+        }).sort({ questionNumber: 1, createdAt: 1 });
+
+        // Defensive dedupe in case a retry slipped past the
+        // already-answered guard.
+        const seenNumbers = new Set();
+
+        const uniqueRows = [];
+
+        for (const row of rows) {
+          const n = Number(row.questionNumber) || 0;
+
+          if (seenNumbers.has(n)) continue;
+
+          seenNumbers.add(n);
+
+          uniqueRows.push(row);
+        }
+
+        if (uniqueRows.length === 0) {
+          return res.status(400).json({
+            message: "No recorded answers found for this session",
+          });
+        }
+
+        const correctCount = uniqueRows.reduce(
+          (acc, row) => acc + (Number(row.score) || 0),
+          0
+        );
+
+        const breakdown = uniqueRows.map((row, i) => {
+          const entry = paper[i] || null;
+
+          return {
+            text: String(row.question || ""),
+            difficulty: entry ? entry.difficulty : "",
+            yourAnswer: String(row.answer || ""),
+            correctAnswer: entry ? entry.options[entry.correctIndex] : "",
+            expectedPoints: entry ? entry.expectedPoints : "",
+            correct: (Number(row.score) || 0) >= 1,
+          };
+        });
+
+        const missed = breakdown.filter((b) => !b.correct);
+
+        let summary = "";
+
+        try {
+          const wrongList = missed.length
+            ? missed
+                .map(
+                  (b) =>
+                    `- Q: ${b.text}\n  Expected knowledge: ${
+                      b.expectedPoints || "(n/a)"
+                    }`
+                )
+                .join("\n")
+            : "- The student answered every question correctly.";
+
+          const response = await completeChat({
+            messages: [
+              {
+                role: "system",
+                content:
+                  `You are a professional technical interviewer writing a short result summary for a multiple-choice mock interview.\n\n` +
+                  `The student is in class: ${className}. ${difficultyNote(className)}\n\n` +
+                  `Result: ${correctCount} of ${breakdown.length} correct.\n\n` +
+                  `Questions the student got wrong, with the knowledge they were missing:\n${wrongList}\n\n` +
+                  `Rules:\n` +
+                  `- At most 5 sentences total\n` +
+                  `- First sentence: overall verdict\n` +
+                  `- Then name the specific topics to revise based ONLY on the listed misses\n` +
+                  `- Last sentence: one concrete study tip\n` +
+                  `- Professional, encouraging tone. Plain text only.`,
+              },
+              {
+                role: "user",
+                content: "Write the result summary now.",
+              },
+            ],
+            temperature: 0.4,
+            maxTokens: 300,
+          });
+
+          summary = String(
+            response.data.choices[0].message.content || ""
+          ).trim();
+        } catch (aiError) {
+          console.log("SUMMARY AI FAILED — using static fallback");
+          console.log(aiError.message);
+        }
+
+        if (!summary) {
+          const pct = breakdown.length
+            ? Math.round((correctCount / breakdown.length) * 100)
+            : 0;
+
+          summary =
+            pct >= 80
+              ? `Excellent result — ${correctCount} of ${breakdown.length} correct. Keep reinforcing that depth across every syllabus topic.`
+              : pct >= 60
+              ? `Good attempt — ${correctCount} of ${breakdown.length} correct. Revise the topics behind the questions you missed and retest yourself soon.`
+              : pct >= 40
+              ? `Average result — ${correctCount} of ${breakdown.length} correct. Focus on the missed topics below before retaking.`
+              : `Needs improvement — ${correctCount} of ${breakdown.length} correct. Rebuild the fundamentals topic by topic, starting with the areas you missed.`;
+        }
+
+        return res.json({
+          finished: true,
+          score: correctCount,
+          maxScore: breakdown.length,
+          total: breakdown.length,
+          summary,
+          breakdown,
+        });
+      }
+
+      //
+      // ANSWER — grade the pick against the deterministic paper and save
+      // the row. Correctness is NOT revealed until the result screen.
+      //
+      const currentIndex = Number(questionIndex) || 0;
+
+      const answeredEntry = paper[Math.max(currentIndex - 1, 0)] || null;
+
+      const picked = Number(pickedIndex);
+
+      if (
+        !answeredEntry ||
+        !Number.isInteger(picked) ||
+        picked < 0 ||
+        picked > 3
+      ) {
+        return res.status(400).json({
+          message: "Invalid answer submission",
+        });
+      }
+
+      // Idempotency: a retried pick for an already-answered question
+      // returns the same payload as a fresh success instead of an
+      // error, so a flaky connection can never strand the student.
+      const existingRow = await Interview.findOne({
+        studentUsername,
+        sessionId,
+        questionNumber: currentIndex,
+      });
+
+      if (existingRow) {
+        const nextEntry =
+          currentIndex < paper.length ? paper[currentIndex] : null;
+
+        return res.json({
+          answered: currentIndex,
+          remaining: Math.max(paper.length - currentIndex, 0),
+          lastAnswered: !nextEntry,
+          nextQuestion: nextEntry
+            ? { index: currentIndex + 1, ...toPublicQuestion(nextEntry) }
+            : null,
+        });
+      }
+
+      const wasCorrect = picked === answeredEntry.correctIndex;
+
       const newInterview = new Interview({
         studentUsername,
         interviewerUsername: student.createdBy || "",
-        sessionId: sessionId || "",
+        sessionId,
         subject: "Common Interview",
         className,
-        question: question || "",
-        answer: message,
-        feedback,
-        score,
+        question: answeredEntry.text,
+        answer: String(answeredEntry.options[picked] || "").slice(0, 200),
+        feedback: wasCorrect
+          ? ""
+          : `Missed — expected: ${answeredEntry.expectedPoints}`.slice(
+              0,
+              300
+            ),
+        score: wasCorrect ? 1 : 0,
+        questionNumber: currentIndex,
         violationCount: Number(violationCount) || 0,
       });
 
       await newInterview.save();
 
-      res.json({
-        reply,
-        score,
-        feedback,
-        remaining: Math.max(remaining - 1, 0),
+      const nextEntry =
+        currentIndex < paper.length ? paper[currentIndex] : null;
+
+      return res.json({
+        answered: currentIndex,
+        remaining: Math.max(paper.length - currentIndex, 0),
+        lastAnswered: !nextEntry,
+        nextQuestion: nextEntry
+          ? { index: currentIndex + 1, ...toPublicQuestion(nextEntry) }
+          : null,
       });
     } catch (error) {
       console.log("ERROR OCCURRED");
       console.log(error);
 
-      const groqStatus = error.response?.status;
-      const groqCode = error.response?.data?.error?.code;
-      const groqMessage = error.response?.data?.error?.message;
+      const status = error.response?.status;
 
-      const promptTooLarge =
-        groqStatus === 413 ||
-        groqCode === "rate_limit_exceeded" ||
-        (typeof groqMessage === "string" &&
-          /too large|context|token|rate limit/i.test(groqMessage));
+      const allProvidersBusy =
+        status === 429 ||
+        /rate limit/i.test(
+          error.response?.data?.error?.message || ""
+        );
 
-      const message = promptTooLarge
-        ? "Could not generate the question — the class syllabus is too large for the AI provider's token limit. Please shorten the syllabus in Setup and try again."
+      const message = allProvidersBusy
+        ? "The AI service is currently busy with too many requests. Please wait a moment and try again."
         : "Something went wrong";
 
       res.status(500).json({
@@ -1440,6 +2053,100 @@ app.post(
   }
 );
 
+//
+// SCORE A LIVE SESSION (interviewer only)
+//
+app.post(
+  "/api/live/:code/score",
+  authInterviewer,
+  async (req, res) => {
+    try {
+      const code = String(req.params.code || "")
+        .trim()
+        .toUpperCase();
+
+      const session = await LiveSession.findOne({ code });
+
+      if (!session) {
+        return res.status(404).json({
+          message: "Invalid room code",
+        });
+      }
+
+      if (
+        session.interviewerUsername !== req.interviewer.username
+      ) {
+        return res.status(403).json({
+          message: "You do not have access to this room",
+        });
+      }
+
+      const score = Number(req.body.score);
+
+      if (
+        Number.isNaN(score) ||
+        score < 0 ||
+        score > 10
+      ) {
+        return res.status(400).json({
+          message: "Score must be a number between 0 and 10",
+        });
+      }
+
+      session.score = Math.round(score * 10) / 10;
+      session.scoredAt = new Date();
+
+      await session.save();
+
+      res.json({
+        message: "Score saved",
+        code: session.code,
+        score: session.score,
+        scoredAt: session.scoredAt,
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// GET ALL LIVE SESSIONS FOR INTERVIEWER
+//
+app.get(
+  "/api/live-sessions",
+  authInterviewer,
+  async (req, res) => {
+    try {
+      const sessions = await LiveSession.find({
+        interviewerUsername: req.interviewer.username,
+      }).sort({ createdAt: -1 });
+
+      res.json(
+        sessions.map((s) => ({
+          code: s.code,
+          className: s.className,
+          studentUsername: s.studentUsername,
+          status: s.status,
+          score: s.score,
+          scoredAt: s.scoredAt,
+          createdAt: s.createdAt,
+        }))
+      );
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
 // Shared auth for the room routes: accepts an interviewer OR student token
 function handleLiveRoomAuth(req, res, handler) {
   try {
@@ -1484,6 +2191,259 @@ function handleLiveRoomAuth(req, res, handler) {
     });
   }
 }
+
+//
+// ADMIN — CREATE INTERVIEWER
+//
+app.post(
+  "/api/admin/interviewers",
+  authAdmin,
+  async (req, res) => {
+    try {
+      const { username, password, email, makeAdmin } = req.body;
+
+      const credError = validateCredentials(username, password);
+
+      if (credError) {
+        return res.status(400).json({
+          message: credError,
+        });
+      }
+
+      const cleanEmail = String(email || "").trim().toLowerCase();
+
+      if (cleanEmail && !EMAIL_REGEX.test(cleanEmail)) {
+        return res.status(400).json({
+          message: "A valid email address is required",
+        });
+      }
+
+      const existing = await Interviewer.findOne({
+        username: username.trim(),
+      });
+
+      if (existing) {
+        return res.status(400).json({
+          message: "Interviewer already exists",
+        });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      const newInterviewer = new Interviewer({
+        username: username.trim(),
+        password: hashedPassword,
+        plainPassword: password,
+        email: cleanEmail,
+        role: makeAdmin ? "admin" : "interviewer",
+      });
+
+      await newInterviewer.save();
+
+      res.json({
+        message: `Interviewer ${newInterviewer.username} created`,
+        username: newInterviewer.username,
+        email: newInterviewer.email,
+        role: newInterviewer.role,
+        plainPassword: newInterviewer.plainPassword,
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// ADMIN — LIST INTERVIEWERS
+//
+app.get(
+  "/api/admin/interviewers",
+  authAdmin,
+  async (req, res) => {
+    try {
+      const interviewers = await Interviewer.find({}).sort({
+        createdAt: -1,
+      });
+
+      res.json({
+        interviewers: interviewers.map((i) => ({
+          _id: i._id,
+          username: i.username,
+          email: i.email,
+          role: i.role,
+          plainPassword: i.plainPassword,
+          createdAt: i.createdAt,
+        })),
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// ADMIN — LIST STUDENTS
+//
+app.get(
+  "/api/admin/students",
+  authAdmin,
+  async (req, res) => {
+    try {
+      const students = await Student.find({}).sort({
+        createdAt: -1,
+      });
+
+      res.json({
+        students: students.map((s) => ({
+          _id: s._id,
+          username: s.username,
+          name: s.name,
+          className: s.className,
+          plainPassword: s.plainPassword,
+          createdAt: s.createdAt,
+        })),
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// ADMIN — RESET STUDENT PASSWORD
+//
+app.post(
+  "/api/admin/students/:id/reset-password",
+  authAdmin,
+  async (req, res) => {
+    try {
+      const password = String(req.body.password || "");
+
+      if (password.length < 6) {
+        return res.status(400).json({
+          message: "Password must be at least 6 characters",
+        });
+      }
+
+      const student = await Student.findById(req.params.id);
+
+      if (!student) {
+        return res.status(404).json({
+          message: "Student not found",
+        });
+      }
+
+      student.password = await bcrypt.hash(password, 10);
+      student.plainPassword = password;
+
+      await student.save();
+
+      res.json({
+        message: `Password updated for ${student.username}`,
+        username: student.username,
+        plainPassword: student.plainPassword,
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// ADMIN — DELETE INTERVIEWER
+//
+app.delete(
+  "/api/admin/interviewers/:id",
+  authAdmin,
+  async (req, res) => {
+    try {
+      const interviewer = await Interviewer.findById(req.params.id);
+
+      if (!interviewer) {
+        return res.status(404).json({
+          message: "Interviewer not found",
+        });
+      }
+
+      if (interviewer.username === req.admin.username) {
+        return res.status(400).json({
+          message: "You cannot delete your own account",
+        });
+      }
+
+      if (interviewer.role === "admin") {
+        const adminCount = await Interviewer.countDocuments({
+          role: "admin",
+        });
+
+        if (adminCount <= 1) {
+          return res.status(400).json({
+            message: "Cannot delete the last admin account",
+          });
+        }
+      }
+
+      await interviewer.deleteOne();
+
+      res.json({
+        message: `Interviewer ${interviewer.username} deleted`,
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
+
+//
+// ADMIN — DELETE STUDENT
+//
+app.delete(
+  "/api/admin/students/:id",
+  authAdmin,
+  async (req, res) => {
+    try {
+      const student = await Student.findById(req.params.id);
+
+      if (!student) {
+        return res.status(404).json({
+          message: "Student not found",
+        });
+      }
+
+      await student.deleteOne();
+
+      res.json({
+        message: `Student ${student.username} deleted`,
+      });
+    } catch (error) {
+      console.log(error);
+
+      res.status(500).json({
+        message: "Server error",
+      });
+    }
+  }
+);
 
 // 404 + error handler
 app.use(notFound);

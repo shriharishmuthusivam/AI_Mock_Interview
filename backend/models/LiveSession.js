@@ -30,6 +30,18 @@ const liveSessionSchema = new mongoose.Schema({
     default: "waiting",
   },
 
+  score: {
+    type: Number,
+    default: null,
+    min: 0,
+    max: 10,
+  },
+
+  scoredAt: {
+    type: Date,
+    default: null,
+  },
+
   createdAt: {
     type: Date,
     default: Date.now,

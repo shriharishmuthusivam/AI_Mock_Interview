@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "create-interviewer": "node scripts/create-interviewer.js",
+    "set-admin": "node scripts/set-admin.js"
   },
   "keywords": [],
   "author": "",

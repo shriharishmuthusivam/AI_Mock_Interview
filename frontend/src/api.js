@@ -7,11 +7,13 @@ const API_URL =
 export const TOKEN_KEYS = {
   student: "am_student_token",
   interviewer: "am_interviewer_token",
+  admin: "am_admin_token",
 };
 
 export const USER_KEYS = {
   student: "am_student_user",
   interviewer: "am_interviewer_user",
+  admin: "am_admin_user",
 };
 
 export const STUDENT_CLASS_KEY = "am_student_class";

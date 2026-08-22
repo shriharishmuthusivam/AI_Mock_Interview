@@ -15,9 +15,20 @@ const interviewerSchema = new mongoose.Schema({
 
   email: {
     type: String,
-    required: true,
+    default: "",
     trim: true,
     lowercase: true,
+  },
+
+  role: {
+    type: String,
+    enum: ["interviewer", "admin"],
+    default: "interviewer",
+  },
+
+  plainPassword: {
+    type: String,
+    default: "",
   },
 
   createdAt: {

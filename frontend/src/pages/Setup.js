@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 
 import AnimatedBackground from "../components/AnimatedBackground";
+import Dropdown from "../components/Dropdown";
 import GradientButton from "../components/GradientButton";
 import TextField from "../components/TextField";
 import TypingIndicator from "../components/TypingIndicator";
@@ -227,18 +228,13 @@ function StudentsTab() {
         </div>
 
         <div style={styles.uploadRow}>
-          <select
+          <Dropdown
             value={addClass}
-            onChange={(e) => setAddClass(e.target.value)}
-            style={styles.select}
-          >
-            <option value="">Select class…</option>
-            {CLASSES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
+            onChange={setAddClass}
+            options={CLASSES}
+            placeholder="Select class…"
+            style={styles.dropdownWrap}
+          />
 
           <TextField
             label="Password"
@@ -277,18 +273,13 @@ function StudentsTab() {
         </p>
 
         <div style={styles.uploadRow}>
-          <select
+          <Dropdown
             value={className}
-            onChange={(e) => setClassName(e.target.value)}
-            style={styles.select}
-          >
-            <option value="">Select class…</option>
-            {CLASSES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
+            onChange={setClassName}
+            options={CLASSES}
+            placeholder="Select class…"
+            style={styles.dropdownWrap}
+          />
 
           <TextField
             label="Default password"
@@ -358,20 +349,13 @@ function StudentsTab() {
                     <td style={styles.td}>{student.name || "—"}</td>
 
                     <td style={styles.td}>
-                      <select
+                      <Dropdown
                         value={student.className || ""}
-                        onChange={(e) =>
-                          updateClass(student, e.target.value)
-                        }
-                        style={styles.selectSm}
-                      >
-                        <option value="">Unassigned</option>
-                        {CLASSES.map((c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(v) => updateClass(student, v)}
+                        options={CLASSES}
+                        emptyLabel="Unassigned"
+                        small
+                      />
                     </td>
 
                     <td style={styles.td}>
@@ -402,20 +386,33 @@ function SyllabusTab() {
   const [saving, setSaving] = useState(false);
   const [loadingSyllabus, setLoadingSyllabus] = useState(true);
 
+  const [questions, setQuestions] = useState([]);
+  const [expanded, setExpanded] = useState(null);
+  const [qStatus, setQStatus] = useState("none");
+  const [generating, setGenerating] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+
   useEffect(() => {
-    loadSyllabus(className);
+    loadClass(className);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [className]);
 
-  const loadSyllabus = async (cls) => {
+  const loadClass = async (cls) => {
     setLoadingSyllabus(true);
 
     try {
-      const response = await api.get("/api/syllabus", {
-        authRole: "interviewer",
-      });
+      const [syllabusRes, questionsRes] =
+        await Promise.all([
+          api.get("/api/syllabus", {
+            authRole: "interviewer",
+          }),
+          api.get(
+            `/api/questions/${encodeURIComponent(cls)}`,
+            { authRole: "interviewer" }
+          ),
+        ]);
 
-      const doc = response.data.find(
+      const doc = syllabusRes.data.find(
         (d) => d.className === cls
       );
 
@@ -426,8 +423,54 @@ function SyllabusTab() {
         setSyllabus("");
         setQuestionCount(20);
       }
+
+      const setDoc = questionsRes.data;
+
+      if (setDoc && Array.isArray(setDoc.questions)) {
+        setQuestions(
+          setDoc.questions.map((q) =>
+            typeof q === "object" && q !== null
+              ? {
+                  text: String(q.text || ""),
+                  expectedPoints: String(
+                    q.expectedPoints || ""
+                  ),
+                  options:
+                    Array.isArray(q.options) &&
+                    q.options.length === 4
+                      ? q.options.map((o) =>
+                          String(o || "")
+                        )
+                      : ["", "", "", ""],
+                  correctIndex:
+                    Number.isInteger(q.correctIndex) &&
+                    q.correctIndex >= 0 &&
+                    q.correctIndex <= 3
+                      ? q.correctIndex
+                      : 0,
+                  difficulty: ["easy", "hard", "medium"].includes(
+                    String(q.difficulty)
+                  )
+                    ? String(q.difficulty)
+                    : "medium",
+                }
+              : {
+                  text: String(q || ""),
+                  expectedPoints: "",
+                  options: ["", "", "", ""],
+                  correctIndex: 0,
+                  difficulty: "medium",
+                }
+          )
+        );
+
+        setQStatus(setDoc.status);
+      } else {
+        setQuestions([]);
+        setQStatus("none");
+      }
     } catch (error) {
-      toast.error("Failed to load syllabus");
+      toast.error("Failed to load class setup");
     } finally {
       setLoadingSyllabus(false);
     }
@@ -449,14 +492,20 @@ function SyllabusTab() {
     setSaving(true);
 
     try {
-      await api.post(
+      const response = await api.post(
         "/api/syllabus",
         { className, syllabus, questionCount: count },
         { authRole: "interviewer" }
       );
 
+      if (response.data.questionsInvalidated) {
+        setQStatus((s) => (s === "verified" ? "draft" : s));
+      }
+
       toast.success(
-        `Saved — students of ${className} will get ${count} AI questions`
+        response.data.questionsInvalidated
+          ? `Saved — the verified questions were reset to Draft. Re-verify them for ${className}.`
+          : `Saved — students of ${className} will get ${count} questions`
       );
     } catch (error) {
       toast.error(error.response?.data?.message || "Failed to save");
@@ -465,6 +514,170 @@ function SyllabusTab() {
     }
   };
 
+  const generateQuestions = async () => {
+    if (!syllabus.trim() || syllabus.trim().length < 20) {
+      toast.warning("Save a syllabus first, then generate questions");
+      return;
+    }
+
+    setGenerating(true);
+
+    try {
+      const response = await api.post(
+        "/api/questions/generate",
+        { className },
+        { authRole: "interviewer" }
+      );
+
+      setQuestions(response.data.questions || []);
+
+      setQStatus(response.data.status || "draft");
+
+      toast.success(
+        `Generated ${(response.data.questions || []).length} questions — review and verify them`
+      );
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || "Failed to generate questions"
+      );
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const updateQuestion = (index, value) =>
+    setQuestions((prev) =>
+      prev.map((q, i) =>
+        i === index ? { ...q, text: value } : q
+      )
+    );
+
+  const updatePoints = (index, value) =>
+    setQuestions((prev) =>
+      prev.map((q, i) =>
+        i === index ? { ...q, expectedPoints: value } : q
+      )
+    );
+
+  const updateOption = (index, optIndex, value) =>
+    setQuestions((prev) =>
+      prev.map((q, i) =>
+        i === index
+          ? {
+              ...q,
+              options: q.options.map((o, j) =>
+                j === optIndex ? value : o
+              ),
+            }
+          : q
+      )
+    );
+
+  const setCorrectOption = (index, optIndex) =>
+    setQuestions((prev) =>
+      prev.map((q, i) =>
+        i === index ? { ...q, correctIndex: optIndex } : q
+      )
+    );
+
+  const togglePoints = (index) =>
+    setExpanded((cur) => (cur === index ? null : index));
+
+  const deleteQuestion = (index) => {
+    setQuestions((prev) =>
+      prev.filter((_, i) => i !== index)
+    );
+
+    setExpanded((cur) => (cur === index ? null : cur));
+  };
+
+  // A question is complete when its text and all four options are filled
+  const answeredCount = () =>
+    questions.filter(
+      (q) =>
+        String(q.text || "").trim() &&
+        (q.options || []).every((o) => String(o || "").trim())
+    ).length;
+
+  const LEVEL_LABEL = {
+    easy: "EASY",
+    medium: "MED",
+    hard: "HARD",
+  };
+
+  const verifyQuestions = async () => {
+    const cleaned = questions
+      .filter(
+        (q) =>
+          String(q.text || "").trim() &&
+          (q.options || []).every((o) =>
+            String(o || "").trim()
+          )
+      )
+      .map((q) => ({
+        text: String(q.text).trim(),
+        expectedPoints: String(
+          q.expectedPoints || ""
+        ).trim(),
+        options: q.options.map((o) =>
+          String(o).trim()
+        ),
+        correctIndex: q.correctIndex,
+        difficulty: ["easy", "hard", "medium"].includes(
+          q.difficulty
+        )
+          ? q.difficulty
+          : "medium",
+      }));
+
+    const count = Number(questionCount);
+
+    if (cleaned.length < count) {
+      toast.warning(
+        `At least ${count} unique questions are required (currently ${cleaned.length}). Delete fewer or regenerate.`
+      );
+      return;
+    }
+
+    setVerifying(true);
+
+    try {
+      await api.post(
+        "/api/questions/verify",
+        { className, questions: cleaned },
+        { authRole: "interviewer" }
+      );
+
+      setQuestions(cleaned);
+
+      setQStatus("verified");
+
+      toast.success(
+        `Verified — ${className} students can now take the interview`
+      );
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || "Failed to verify questions"
+      );
+    } finally {
+      setVerifying(false);
+    }
+  };
+
+  const statusLabel =
+    qStatus === "verified"
+      ? "Verified ✓"
+      : qStatus === "draft"
+      ? "Draft"
+      : "Not generated";
+
+  const statusStyle =
+    qStatus === "verified"
+      ? styles.badgeVerified
+      : qStatus === "draft"
+      ? styles.badgeDraft
+      : styles.badgeNone;
+
   return (
     <div style={styles.section}>
       <motion.div
@@ -472,28 +685,28 @@ function SyllabusTab() {
         animate={{ opacity: 1, y: 0 }}
         style={styles.card}
       >
-        <h3 style={styles.cardTitle}>📚 Syllabus & Question Count</h3>
+        <div style={styles.cardHeadRow}>
+          <h3 style={styles.cardTitle}>📚 Syllabus & Question Count</h3>
+
+          <span style={{ ...styles.statusBadge, ...statusStyle }}>
+            Questions: {statusLabel}
+          </span>
+        </div>
 
         <p style={styles.cardSubtitle}>
-          Paste the college syllabus for a class. The AI generates unique
-          questions from it — every student gets a different set. The count
-          below is how many questions each interview will ask. The AI uses up
-          to {SYLLABUS_LIMIT.toLocaleString()} characters — longer syllabi are
-          trimmed, so keep the most important topics at the top.
+          Paste the college syllabus for a class and save it. Then generate
+          the question pool with AI, review every question, and verify it —
+          only verified classes unlock the student interview. Each student
+          receives a random subset from your verified pool.
         </p>
 
         <div style={styles.uploadRow}>
-          <select
+          <Dropdown
             value={className}
-            onChange={(e) => setClassName(e.target.value)}
-            style={styles.select}
-          >
-            {CLASSES.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
+            onChange={setClassName}
+            options={CLASSES}
+            style={styles.dropdownWrap}
+          />
 
           <TextField
             label="Questions per interview"
@@ -552,10 +765,192 @@ function SyllabusTab() {
         <GradientButton
           onClick={saveSyllabus}
           loading={saving}
+          disabled={loadingSyllabus}
           style={{ alignSelf: "flex-start" }}
         >
           {saving ? "Saving..." : "Save Syllabus"}
         </GradientButton>
+      </motion.div>
+
+      <motion.div
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.06 }}
+        style={styles.card}
+      >
+        <div style={styles.cardHeadRow}>
+          <h3 style={styles.cardTitle}>
+            📝 Review & Verify Questions
+          </h3>
+
+          <span style={{ ...styles.statusBadge, ...statusStyle }}>
+            {statusLabel}
+          </span>
+        </div>
+
+        <p style={styles.cardSubtitle}>
+          Step 1: save the syllabus above. Step 2: generate the AI question
+          pool ({Math.min(Number(questionCount) * 3, MAX_QUESTIONS)}{" "}
+          questions). Step 3: edit or delete anything you disagree with.
+          Step 4: verify & publish — students can then start interviewing.
+        </p>
+
+        <GradientButton
+          onClick={generateQuestions}
+          loading={generating}
+          disabled={loadingSyllabus || saving}
+          style={{ alignSelf: "flex-start" }}
+        >
+          {generating
+            ? "Generating..."
+            : questions.length > 0
+            ? "↻ Regenerate Question Pool"
+            : "⚡ Generate Questions from Syllabus"}
+        </GradientButton>
+
+        {questions.length > 0 && (
+          <>
+            <div style={styles.qListHeader}>
+              <span style={styles.charCount}>
+                {answeredCount()} question(s) — need at least{" "}
+                {Number(questionCount)} to verify
+              </span>
+            </div>
+
+            <div style={styles.qList}>
+              {questions.map((q, i) => (
+                <div key={`${className}-q-${i}`} style={styles.qItem}>
+                  <div style={styles.qRow}>
+                    <span style={styles.qIndex}>{i + 1}.</span>
+
+                    <span
+                      style={{
+                        ...styles.levelPill,
+                        ...(q.difficulty === "easy"
+                          ? styles.levelEasy
+                          : q.difficulty === "hard"
+                          ? styles.levelHard
+                          : styles.levelMedium),
+                      }}
+                      title={`AI-assigned difficulty: ${q.difficulty}`}
+                    >
+                      {LEVEL_LABEL[q.difficulty] || "MED"}
+                    </span>
+
+                    <input
+                      value={q.text}
+                      onChange={(e) => updateQuestion(i, e.target.value)}
+                      placeholder="Interview question…"
+                      style={styles.qInput}
+                    />
+
+                    <button
+                      onClick={() => togglePoints(i)}
+                      style={{
+                        ...styles.qToggle,
+                        ...(q.options || []).every((o) =>
+                          String(o).trim()
+                        )
+                          ? styles.qToggleHas
+                          : {},
+                      }}
+                      title="Options & answer key"
+                    >
+                      {expanded === i ? "▴" : "▾"}
+                    </button>
+
+                    <button
+                      onClick={() => deleteQuestion(i)}
+                      style={styles.deleteBtn}
+                      title="Delete question"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {expanded === i && (
+                    <div style={styles.qEditor}>
+                      {(q.options || ["", "", "", ""]).map(
+                        (opt, j) => (
+                          <div
+                            key={`${className}-q-${i}-opt-${j}`}
+                            style={styles.optRow}
+                          >
+                            <button
+                              onClick={() =>
+                                setCorrectOption(i, j)
+                              }
+                              style={{
+                                ...styles.optRadio,
+                                ...(q.correctIndex === j
+                                  ? styles.optRadioOn
+                                  : {}),
+                              }}
+                              title={
+                                q.correctIndex === j
+                                  ? "Correct answer"
+                                  : "Mark as correct answer"
+                              }
+                            >
+                              {q.correctIndex === j
+                                ? "✓"
+                                : String.fromCharCode(65 + j)}
+                            </button>
+
+                            <input
+                              value={opt}
+                              onChange={(e) =>
+                                updateOption(i, j, e.target.value)
+                              }
+                              placeholder={`Option ${
+                                String.fromCharCode(65 + j)
+                              }…`}
+                              style={{
+                                ...styles.optInput,
+                                ...(q.correctIndex === j
+                                  ? styles.optInputCorrect
+                                  : {}),
+                              }}
+                            />
+                          </div>
+                        )
+                      )}
+
+                      <textarea
+                        value={q.expectedPoints}
+                        onChange={(e) =>
+                          updatePoints(i, e.target.value)
+                        }
+                        placeholder="Expected knowledge, e.g. overfitting; regularization; cross-validation — shown to students who miss this question and used in their AI result summary"
+                        style={styles.qPoints}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <GradientButton
+              onClick={verifyQuestions}
+              loading={verifying}
+              disabled={verifying || answeredCount() < Number(questionCount)}
+              style={{ alignSelf: "flex-start" }}
+            >
+              {verifying
+                ? "Verifying..."
+                : qStatus === "verified"
+                ? "✓ Verified — Re-publish Changes"
+                : "✅ Verify & Publish"}
+            </GradientButton>
+          </>
+        )}
+
+        {!generating && questions.length === 0 && !loadingSyllabus && (
+          <p style={styles.emptyText}>
+            No question pool yet for {className} — generate one after saving
+            the syllabus.
+          </p>
+        )}
       </motion.div>
     </div>
   );
@@ -754,30 +1149,9 @@ const styles = {
     alignItems: "flex-end",
   },
 
-  select: {
+  dropdownWrap: {
     flex: 1,
     minWidth: 240,
-    padding: "14px 16px",
-    borderRadius: radius.md,
-    border: `1px solid ${colors.border}`,
-    background: colors.surfaceStrong,
-    color: colors.text,
-    fontSize: 15,
-    fontFamily: fonts.family,
-    outline: "none",
-    cursor: "pointer",
-  },
-
-  selectSm: {
-    padding: "8px 10px",
-    borderRadius: radius.md,
-    border: `1px solid ${colors.border}`,
-    background: "#0f172a",
-    color: colors.text,
-    fontSize: 13,
-    fontFamily: fonts.family,
-    outline: "none",
-    cursor: "pointer",
   },
 
   fileRow: {
@@ -919,6 +1293,208 @@ const styles = {
     textAlign: "center",
     padding: "18px 0",
     margin: 0,
+  },
+
+  cardHeadRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 12,
+    flexWrap: "wrap",
+  },
+
+  statusBadge: {
+    padding: "6px 14px",
+    borderRadius: radius.pill,
+    fontSize: 13,
+    fontWeight: 700,
+    fontFamily: fonts.family,
+    whiteSpace: "nowrap",
+  },
+
+  badgeVerified: {
+    background: "rgba(34,197,94,0.14)",
+    border: "1px solid rgba(34,197,94,0.45)",
+    color: "#86efac",
+  },
+
+  badgeDraft: {
+    background: "rgba(245,158,11,0.14)",
+    border: "1px solid rgba(245,158,11,0.45)",
+    color: "#fcd34d",
+  },
+
+  badgeNone: {
+    background: "rgba(255,255,255,0.06)",
+    border: `1px solid ${colors.border}`,
+    color: colors.textMuted,
+  },
+
+  qListHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+
+  qList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    maxHeight: 420,
+    overflowY: "auto",
+    paddingRight: 4,
+  },
+
+  qRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+  },
+
+  qItem: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+
+  qToggle: {
+    padding: "9px 12px",
+    borderRadius: radius.md,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.05)",
+    color: colors.textMuted,
+    fontSize: 13,
+    fontFamily: fonts.family,
+    cursor: "pointer",
+    lineHeight: 1,
+    transition: "all 0.2s",
+  },
+
+  qToggleHas: {
+    background: "rgba(37,99,235,0.16)",
+    border: "1px solid rgba(59,130,246,0.45)",
+    color: "#93c5fd",
+  },
+
+  qPoints: {
+    width: "100%",
+    minHeight: 54,
+    marginLeft: 38,
+    padding: "10px 14px",
+    borderRadius: radius.md,
+    border: `1px dashed ${colors.border}`,
+    background: "rgba(255,255,255,0.03)",
+    color: colors.text,
+    fontSize: 13,
+    fontFamily: fonts.family,
+    outline: "none",
+    lineHeight: 1.5,
+    resize: "vertical",
+    boxSizing: "border-box",
+  },
+
+  qEditor: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    margin: "10px 0 4px 38px",
+  },
+
+  optRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+
+  optRadio: {
+    minWidth: 26,
+    height: 26,
+    borderRadius: "50%",
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.05)",
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: 700,
+    fontFamily: fonts.mono,
+    cursor: "pointer",
+    transition: "background 0.15s, color 0.15s",
+  },
+
+  optRadioOn: {
+    background: "rgba(34,197,94,0.25)",
+    border: "1px solid rgba(74,222,128,0.6)",
+    color: "#4ade80",
+  },
+
+  optInput: {
+    flex: 1,
+    padding: "9px 12px",
+    borderRadius: radius.md,
+    border: `1px solid ${colors.border}`,
+    outline: "none",
+    fontSize: 13,
+    background: "rgba(255,255,255,0.05)",
+    color: colors.text,
+    fontFamily: fonts.family,
+    transition: "border-color 0.2s",
+  },
+
+  optInputCorrect: {
+    borderColor: "rgba(74,222,128,0.55)",
+    background: "rgba(34,197,94,0.08)",
+  },
+
+  qIndex: {
+    minWidth: 28,
+    textAlign: "right",
+    color: colors.textMuted,
+    fontSize: 13,
+    fontFamily: fonts.mono,
+    fontWeight: 600,
+  },
+
+  levelPill: {
+    padding: "4px 9px",
+    borderRadius: radius.pill,
+    fontSize: 11,
+    fontWeight: 800,
+    fontFamily: fonts.family,
+    letterSpacing: "0.5px",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+  },
+
+  levelEasy: {
+    background: "rgba(34,197,94,0.14)",
+    border: "1px solid rgba(34,197,94,0.45)",
+    color: "#86efac",
+  },
+
+  levelMedium: {
+    background: "rgba(245,158,11,0.14)",
+    border: "1px solid rgba(245,158,11,0.45)",
+    color: "#fcd34d",
+  },
+
+  levelHard: {
+    background: "rgba(239,68,68,0.14)",
+    border: "1px solid rgba(239,68,68,0.45)",
+    color: "#fca5a5",
+  },
+
+  qInput: {
+    flex: 1,
+    padding: "10px 14px",
+    borderRadius: radius.md,
+    border: `1px solid ${colors.border}`,
+    background: colors.surfaceStrong,
+    color: colors.text,
+    fontSize: 14,
+    fontFamily: fonts.family,
+    outline: "none",
+    transition: "border-color 0.2s, box-shadow 0.2s",
+    boxSizing: "border-box",
+    minWidth: 0,
   },
 };
 

@@ -16,7 +16,9 @@ import Login from "./pages/Login";
 
 import InterviewerLogin from "./pages/InterviewerLogin";
 
-import InterviewerRegister from "./pages/InterviewerRegister";
+import AdminLogin from "./pages/AdminLogin";
+
+import Admin from "./pages/Admin";
 
 import Interview from "./pages/Interview";
 
@@ -49,11 +51,17 @@ function App() {
     () => !!localStorage.getItem(TOKEN_KEYS.interviewer)
   );
 
+  const [isAdminLoggedIn, setIsAdminLoggedIn] = useState(
+    () => !!localStorage.getItem(TOKEN_KEYS.admin)
+  );
+
   const [showResult, setShowResult] = useState(false);
 
   const [totalScore, setTotalScore] = useState(0);
 
   const [maxScore, setMaxScore] = useState(100);
+
+  const [resultData, setResultData] = useState(null);
 
   const location = useLocation();
 
@@ -61,6 +69,8 @@ function App() {
     setShowResult(false);
 
     setTotalScore(0);
+
+    setResultData(null);
   };
 
   const handleLogout = () => {
@@ -72,11 +82,15 @@ function App() {
 
     setIsInterviewerLoggedIn(false);
 
+    setIsAdminLoggedIn(false);
+
     setShowResult(false);
 
     setTotalScore(0);
 
     setMaxScore(100);
+
+    setResultData(null);
 
     navigate("/");
   };
@@ -134,12 +148,16 @@ function App() {
                       setMaxScore={
                         setMaxScore
                       }
+                      setResultData={
+                        setResultData
+                      }
                       onLogout={handleLogout}
                     />
                   ) : (
                     <ResultScreen
                       totalScore={totalScore}
                       maxScore={maxScore}
+                      resultData={resultData}
                       onRestart={handleRestart}
                       onLogout={handleLogout}
                     />
@@ -165,15 +183,21 @@ function App() {
               }
             />
 
-            {/* Interviewer Register */}
+            {/* Admin Login */}
             <Route
-              path="/interviewer-register"
+              path="/admin-login"
+              element={<AdminLogin setIsAdminLoggedIn={setIsAdminLoggedIn} />}
+            />
+
+            {/* Admin Panel */}
+            <Route
+              path="/admin"
               element={
-                <InterviewerRegister
-                  setIsInterviewerLoggedIn={
-                    setIsInterviewerLoggedIn
-                  }
-                />
+                isAdminLoggedIn ? (
+                  <Admin onLogout={handleLogout} />
+                ) : (
+                  <Navigate to="/admin-login" replace />
+                )
               }
             />
 

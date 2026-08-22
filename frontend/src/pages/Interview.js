@@ -19,31 +19,34 @@ function Interview({
   setShowResult,
   setTotalScore,
   setMaxScore,
+  setResultData,
   onLogout,
 }) {
   const navigate = useNavigate();
 
   const toast = useToast();
 
-  const [message, setMessage] = useState("");
+  const [current, setCurrent] = useState(null);
 
-  const [chat, setChat] = useState([]);
+  const [totalQuestions, setTotalQuestions] =
+    useState(0);
 
-  const [questionCount, setQuestionCount] = useState(0);
+  const [answeredCount, setAnsweredCount] =
+    useState(0);
+
+  const [selected, setSelected] = useState(null);
 
   const [interviewEnded, setInterviewEnded] =
     useState(false);
 
-  const [isSending, setIsSending] =
-    useState(false);
-
-  const [score, setScore] = useState(0);
+  const [isSending, setIsSending] = useState(false);
 
   const [loading, setLoading] = useState(true);
 
   const [config, setConfig] = useState({
     configured: false,
     questionCount: 0,
+    verified: false,
   });
 
   const [className, setClassName] = useState("");
@@ -58,15 +61,69 @@ function Interview({
 
   const [liveJoinError, setLiveJoinError] = useState("");
 
-  const totalMarksRef = useRef(0);
-
-  const chatBoxRef = useRef(null);
-
   const sessionIdRef = useRef("");
 
-  const currentQuestionRef = useRef("");
-
   const startedRef = useRef(false);
+
+  const finalizeRef = useRef(() => {});
+
+  // Finalize the session: the server aggregates every saved answer
+  // row, scores deterministically, writes a short AI summary and
+  // returns the full per-question breakdown.
+  const finalizeInterview = async () => {
+    if (!sessionIdRef.current || interviewEnded) return;
+
+    setInterviewEnded(true);
+
+    stopProctoring();
+
+    try {
+      const response = await api.post(
+        "/api/chat",
+        {
+          sessionId: sessionIdRef.current,
+          finish: true,
+        },
+        { authRole: "student" }
+      );
+
+      const data = response.data;
+
+      setResultData({
+        summary: data.summary || "",
+        breakdown: Array.isArray(data.breakdown)
+          ? data.breakdown
+          : [],
+      });
+
+      setTotalScore(Number(data.score) || 0);
+
+      setMaxScore(
+        Number(data.maxScore) ||
+          Number(data.total) ||
+          config.questionCount
+      );
+    } catch (error) {
+      console.error(error);
+
+      toast.error(
+        error.response?.data?.message ||
+          "Could not load your results. Please check your connection."
+      );
+
+      setInterviewEnded(true);
+      setIsSending(false);
+      return;
+    }
+
+    sendReport();
+
+    setTimeout(() => {
+      setShowResult(true);
+    }, 1600);
+  };
+
+  finalizeRef.current = finalizeInterview;
 
   const {
     violationCount,
@@ -76,29 +133,13 @@ function Interview({
     maxWarnings: 3,
 
     onViolation: (reason, count, max) => {
-      setChat((prev) => [
-        ...prev,
-        {
-          sender: "ai",
-          text: `WARNING (${count}/${max}): ${reason}\n\nFurther violations will end the interview automatically.`,
-        },
-      ]);
+      toast.warning(
+        `WARNING (${count}/${max}): ${reason}`
+      );
     },
 
     onLimitReached: () => {
-      setInterviewEnded(true);
-
-      stopProctoring();
-
-      setTotalScore(totalMarksRef.current);
-
-      sendReport();
-
-      setTimeout(() => {
-        setMaxScore(config.questionCount * 10);
-
-        setShowResult(true);
-      }, 2000);
+      finalizeRef.current();
     },
   });
 
@@ -108,7 +149,7 @@ function Interview({
 
     if (!cls) {
       setLoading(false);
-      setConfig({ configured: false, questionCount: 0 });
+      setConfig({ configured: false, questionCount: 0, verified: false });
       return;
     }
 
@@ -124,7 +165,7 @@ function Interview({
         setConfig(response.data);
       } catch (error) {
         console.error(error);
-        setConfig({ configured: false, questionCount: 0 });
+        setConfig({ configured: false, questionCount: 0, verified: false });
       } finally {
         setLoading(false);
       }
@@ -132,15 +173,6 @@ function Interview({
 
     load();
   }, []);
-
-  // Auto-scroll chat to the newest message
-  useEffect(() => {
-    const node = chatBoxRef.current;
-
-    if (node) {
-      node.scrollTop = node.scrollHeight;
-    }
-  }, [chat, isSending]);
 
   // Send the completed interview transcript as a PDF report to the interviewer
   const sendReport = async () => {
@@ -157,29 +189,7 @@ function Interview({
     }
   };
 
-  // Build conversation history for the AI (excludes warnings / errors)
-  const buildTranscript = () =>
-    chat
-      .filter(
-        (msg) =>
-          !msg.text.startsWith("WARNING") &&
-          !msg.text.startsWith("Backend not connected")
-      )
-      .map((msg) => ({
-        role: msg.sender === "user" ? "user" : "assistant",
-        content: msg.text,
-      }));
-
-  // Extract the next question from an AI reply
-  const parseNextQuestion = (reply) => {
-    const match = reply.match(/Next Question:\s*([\s\S]+)$/i);
-
-    if (match && match[1].trim()) {
-      currentQuestionRef.current = match[1].trim();
-    }
-  };
-
-  // Start Interview (get the AI to generate the first question)
+  // Start Interview (fetch the first multiple-choice question)
   const beginInterview = async () => {
     if (startedRef.current) return;
 
@@ -194,16 +204,11 @@ function Interview({
 
     setInterviewEnded(false);
 
-    totalMarksRef.current = 0;
+    setAnsweredCount(0);
 
-    setScore(0);
+    setSelected(null);
 
-    setChat([
-      {
-        sender: "ai",
-        text: `Welcome to the ${className} Mock Interview.\n\nAnswer ${config.questionCount} questions based on your class syllabus. Let's begin.`,
-      },
-    ]);
+    setCurrent(null);
 
     setStarted(true);
 
@@ -213,9 +218,7 @@ function Interview({
       const response = await api.post(
         "/api/chat",
         {
-          message: "Begin the interview.",
           sessionId: sessionIdRef.current,
-          transcript: [],
           start: true,
           questionCount: config.questionCount,
           questionIndex: 0,
@@ -223,18 +226,9 @@ function Interview({
         { authRole: "student" }
       );
 
-      const firstQuestion = response.data.reply;
+      setTotalQuestions(response.data.total || config.questionCount);
 
-      currentQuestionRef.current = firstQuestion;
-
-      setQuestionCount(1);
-
-      setChat([
-        {
-          sender: "ai",
-          text: `Welcome to the ${className} Mock Interview.\n\nAnswer ${config.questionCount} questions based on your class syllabus.\n\nFirst question:\n\n${firstQuestion}`,
-        },
-      ]);
+      setCurrent(response.data.question);
     } catch (error) {
       console.error(error);
 
@@ -244,27 +238,18 @@ function Interview({
 
       setStartError(
         error.response?.data?.message ||
-          "Could not start the interview. Please check that the backend and AI service are reachable, then try again."
+          "Could not start the interview. Please check that the backend is reachable, then try again."
       );
 
       stopProctoring();
     }
   };
 
-  // Send Message
-  const sendMessage = async () => {
-    if (!message.trim()) return;
+  // Record a pick. Correctness stays hidden until the result screen.
+  const handlePick = async (optionIndex) => {
+    if (selected !== null || isSending || interviewEnded) return;
 
-    if (interviewEnded) return;
-
-    if (isSending) return;
-
-    const userMessage = {
-      sender: "user",
-      text: message,
-    };
-
-    setChat((prev) => [...prev, userMessage]);
+    setSelected(optionIndex);
 
     setIsSending(true);
 
@@ -272,125 +257,60 @@ function Interview({
       const response = await api.post(
         "/api/chat",
         {
-          message,
           sessionId: sessionIdRef.current,
-          question: currentQuestionRef.current,
+          pickedIndex: optionIndex,
           violationCount,
-          transcript: buildTranscript(),
-          questionCount: config.questionCount,
-          questionIndex: questionCount,
+          questionCount: totalQuestions,
+          questionIndex: current.index,
         },
         { authRole: "student" }
       );
 
-      let aiReply = response.data.reply;
+      const nextQuestion = response.data.nextQuestion;
 
-      const nextCount = questionCount + 1;
+      const answeredSoFar =
+        Number(response.data.answered) || current.index;
 
-      // Remember the next question the AI asks for the report
-      parseNextQuestion(aiReply);
+      setTimeout(() => {
+        setAnsweredCount(answeredSoFar);
 
-      // Remove next question only after the LAST question has been answered
-      if (nextCount > config.questionCount) {
-        aiReply = aiReply.replace(/Next Question:.*/is, "");
-      }
+        if (nextQuestion) {
+          setCurrent(nextQuestion);
 
-      const answerScore = Number(response.data.score) || 0;
+          setSelected(null);
 
-      totalMarksRef.current += answerScore;
-
-      setScore(totalMarksRef.current);
-
-      const aiMessage = {
-        sender: "ai",
-        text: aiReply,
-      };
-
-      setQuestionCount(nextCount);
-
-      // Interview ends after the last configured question is answered
-      if (nextCount > config.questionCount) {
-        setInterviewEnded(true);
-
-        stopProctoring();
-
-        sendReport();
-
-        setTimeout(() => {
-          setTotalScore(totalMarksRef.current);
-
-          setMaxScore(config.questionCount * 10);
-
-          setShowResult(true);
-        }, 2000);
-
-        setChat((prev) => [
-          ...prev,
-          aiMessage,
-          {
-            sender: "ai",
-            text: "Interview Completed Successfully.\n\nThank you for attending the AI Mock Interview.",
-          },
-        ]);
-      } else {
-        setChat((prev) => [...prev, aiMessage]);
-      }
+          setIsSending(false);
+        } else {
+          finalizeInterview();
+        }
+      }, 350);
     } catch (error) {
       console.error(error);
 
-      const status = error.response?.status;
+      toast.error(
+        error.response?.data?.message ||
+          "Could not record the answer. Try again."
+      );
 
-      // If the FINAL answer hits a rate limit, still finish the interview
-      // so the student gets their results instead of being stuck.
-      if (status === 429 && questionCount >= config.questionCount) {
-        setInterviewEnded(true);
+      setSelected(null);
 
-        stopProctoring();
-
-        sendReport();
-
-        setChat((prev) => [
-          ...prev,
-          {
-            sender: "ai",
-            text: "The final answer could not be processed because the AI service was temporarily rate-limited, but your results are ready.",
-          },
-        ]);
-
-        setTimeout(() => {
-          setTotalScore(totalMarksRef.current);
-
-          setMaxScore(config.questionCount * 10);
-
-          setShowResult(true);
-        }, 2000);
-
-        return;
-      }
-
-      const errorMessage = {
-        sender: "ai",
-        text:
-          error.response?.data?.message ||
-          "Backend not connected yet.",
-      };
-
-      setChat((prev) => [...prev, errorMessage]);
-    } finally {
       setIsSending(false);
     }
-
-    setMessage("");
   };
 
   const progress =
-    Math.min(questionCount / (config.questionCount || 1), 1) * 100;
+    Math.min(answeredCount / (totalQuestions || 1), 1) * 100;
 
   const joinLiveInterview = async () => {
     const code = liveCode.trim();
 
     if (!code) {
       setLiveJoinError("Please enter the room code from your interviewer.");
+      return;
+    }
+
+    if (code.length !== 6) {
+      setLiveJoinError("Room code must be exactly 6 characters.");
       return;
     }
 
@@ -457,6 +377,22 @@ function Interview({
       );
     }
 
+    if (!config.verified) {
+      return (
+        <div style={styles.startCard}>
+          <span style={styles.bigIcon}>⏳</span>
+
+          <h2 style={styles.startTitle}>Interview not verified yet</h2>
+
+          <p style={styles.startText}>
+            Your interviewer hasn't verified the question set for{" "}
+            <b>{className}</b> yet. You can start the interview as soon as
+            they publish it.
+          </p>
+        </div>
+      );
+    }
+
     if (!started) {
       return (
         <div style={styles.startCard}>
@@ -466,8 +402,9 @@ function Interview({
 
           <p style={styles.startText}>
             This interview will ask you{" "}
-            <b>{config.questionCount} questions</b> generated from your class
-            syllabus. Proctoring will monitor the session.
+            <b>{config.questionCount} multiple-choice questions</b> from the
+            question set verified by your interviewer. Proctoring will
+            monitor the session.
           </p>
 
           {startError && (
@@ -487,23 +424,16 @@ function Interview({
     return null;
   };
 
+  const levelStyle = (difficulty) =>
+    difficulty === "easy"
+      ? styles.levelEasy
+      : difficulty === "hard"
+      ? styles.levelHard
+      : styles.levelMedium;
+
   return (
     <AnimatedBackground>
       <div style={styles.container}>
-        {/* Top nav */}
-        <div style={styles.navRow}>
-          <button
-            onClick={() => navigate(-1)}
-            style={styles.navBack}
-          >
-            ← Back
-          </button>
-
-          <button onClick={onLogout} style={styles.navLogout}>
-            Logout
-          </button>
-        </div>
-
         {/* Header */}
         <motion.div
           initial={{ opacity: 0, y: -16 }}
@@ -531,14 +461,13 @@ function Interview({
           </p>
         </motion.div>
 
-        {/* Progress + Score */}
+        {/* Progress */}
         {started && !interviewEnded && (
           <div style={styles.progressRow}>
             <div style={styles.progressWrap}>
               <div style={styles.progressLabel}>
-                Question{" "}
-                {Math.min(questionCount, config.questionCount)}/
-                {config.questionCount}
+                Answered {Math.min(answeredCount, totalQuestions)}/
+                {totalQuestions}
               </div>
 
               <div style={styles.progressTrack}>
@@ -549,17 +478,12 @@ function Interview({
                 />
               </div>
             </div>
-
-            <div style={styles.scorePill}>
-              <span style={styles.scoreLabel}>Score</span>
-              <span style={styles.scoreValue}>{score}</span>
-            </div>
           </div>
         )}
 
         {/* Warning Banner */}
         <AnimatePresence>
-          {violationCount > 0 && (
+          {violationCount > 0 && !interviewEnded && (
             <motion.div
               initial={{ opacity: 0, y: -8 }}
               animate={{ opacity: 1, y: 0 }}
@@ -598,10 +522,12 @@ function Interview({
               <input
                 type="text"
                 placeholder="Enter room code"
+                maxLength={6}
                 value={liveCode}
-                onChange={(e) =>
-                  setLiveCode(e.target.value.toUpperCase())
-                }
+                onChange={(e) => {
+                  setLiveCode(e.target.value.toUpperCase());
+                  setLiveJoinError("");
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") joinLiveInterview();
                 }}
@@ -623,90 +549,99 @@ function Interview({
           </motion.div>
         )}
 
-        {/* Chat Box */}
-        {started && (
-          <div style={styles.chatBox} ref={chatBoxRef}>
-            {chat.map((msg, index) => (
-              <motion.div
-                key={`${index}-${msg.sender}`}
-                initial={{ opacity: 0, y: 14, scale: 0.97 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                transition={{ duration: 0.3, ease: "easeOut" }}
-                style={{
-                  ...styles.message,
-                  alignSelf: msg.sender === "user" ? "flex-end" : "flex-start",
-                  flexDirection: msg.sender === "user" ? "row-reverse" : "row",
-                }}
-              >
-                <span style={styles.avatar}>
-                  {msg.sender === "user" ? "🙂" : "🤖"}
+        {/* Question card */}
+        {started && !interviewEnded && current && (
+          <AnimatePresence mode="wait">
+            <motion.div
+              key={current.index}
+              initial={{ opacity: 0, x: 32 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -32 }}
+              transition={{ duration: 0.28, ease: "easeOut" }}
+              style={styles.qCard}
+            >
+              <div style={styles.qCardHead}>
+                <span style={styles.qCounter}>
+                  Question {current.index} of{" "}
+                  {totalQuestions}
                 </span>
 
                 <span
                   style={{
-                    ...styles.bubble,
-                    background:
-                      msg.sender === "user"
-                        ? gradients.primary
-                        : "#1e293b",
+                    ...styles.levelPill,
+                    ...levelStyle(current.difficulty),
                   }}
                 >
-                  {msg.text}
+                  {(current.difficulty || "medium").toUpperCase()}
                 </span>
-              </motion.div>
-            ))}
+              </div>
 
-            {isSending && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                style={{ ...styles.message, alignSelf: "flex-start" }}
-              >
-                <span style={styles.avatar}>🤖</span>
-                <TypingIndicator />
-              </motion.div>
-            )}
-          </div>
-        )}
+              <p style={styles.qText}>{current.text}</p>
 
-        {/* Input Area */}
-        {started && !interviewEnded && (
-          <div style={styles.inputContainer}>
-            <input
-              type="text"
-              placeholder="Type your answer..."
-              autoComplete="off"
-              autoCorrect="off"
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") sendMessage();
-              }}
-              style={styles.input}
-              disabled={isSending}
-            />
+              <div style={styles.optionsWrap}>
+                {current.options.map((option, i) => {
+                  const isSelected = selected === i;
 
-            <motion.button
-              whileHover={{ scale: 1.04 }}
-              whileTap={{ scale: 0.94 }}
-              onClick={sendMessage}
-              style={styles.sendButton}
-              disabled={isSending}
-            >
-              Send ➤
-            </motion.button>
-          </div>
+                  const locked = selected !== null || isSending;
+
+                  return (
+                    <motion.button
+                      key={`${current.index}-${i}`}
+                      whileHover={
+                        locked ? {} : { scale: 1.015, y: -2 }
+                      }
+                      whileTap={locked ? {} : { scale: 0.985 }}
+                      onClick={() => handlePick(i)}
+                      disabled={locked}
+                      style={{
+                        ...styles.optionBtn,
+                        ...(isSelected
+                          ? styles.optionSelected
+                          : {}),
+                        ...(locked && !isSelected
+                          ? styles.optionLocked
+                          : {}),
+                      }}
+                    >
+                      <span
+                        style={{
+                          ...styles.optionLetter,
+                          ...(isSelected
+                            ? styles.optionLetterSelected
+                            : {}),
+                        }}
+                      >
+                        {String.fromCharCode(65 + i)}
+                      </span>
+
+                      <span style={styles.optionText}>
+                        {option}
+                      </span>
+                    </motion.button>
+                  );
+                })}
+              </div>
+
+              {isSending && (
+                <div style={styles.sendingRow}>
+                  <TypingIndicator />
+                </div>
+              )}
+            </motion.div>
+          </AnimatePresence>
         )}
 
         {/* Ended note */}
         {started && interviewEnded && (
-          <motion.p
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            style={styles.endedNote}
+            style={styles.endedWrap}
           >
-            Interview completed — preparing your results...
-          </motion.p>
+            <p style={styles.endedNote}>
+              Interview completed — preparing your results...
+            </p>
+          </motion.div>
         )}
       </div>
     </AnimatedBackground>
@@ -724,41 +659,6 @@ const styles = {
     fontFamily: fonts.family,
     userSelect: "none",
     WebkitUserSelect: "none",
-  },
-
-  navRow: {
-    width: "100%",
-    maxWidth: 900,
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-
-  navBack: {
-    padding: "9px 18px",
-    borderRadius: radius.pill,
-    border: `1px solid ${colors.border}`,
-    background: "rgba(255,255,255,0.06)",
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: 600,
-    fontFamily: fonts.family,
-    cursor: "pointer",
-    transition: "background 0.2s",
-  },
-
-  navLogout: {
-    padding: "9px 18px",
-    borderRadius: radius.pill,
-    border: "1px solid rgba(248,113,113,0.4)",
-    background: "rgba(239,68,68,0.12)",
-    color: "#fca5a5",
-    fontSize: 14,
-    fontWeight: 600,
-    fontFamily: fonts.family,
-    cursor: "pointer",
-    transition: "background 0.2s, color 0.2s",
   },
 
   header: {
@@ -940,28 +840,6 @@ const styles = {
     boxShadow: "0 0 12px rgba(37,99,235,0.5)",
   },
 
-  scorePill: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "8px 16px",
-    borderRadius: radius.pill,
-    background: "rgba(34,211,238,0.1)",
-    border: "1px solid rgba(34,211,238,0.3)",
-  },
-
-  scoreLabel: {
-    color: colors.textMuted,
-    fontSize: 13,
-  },
-
-  scoreValue: {
-    fontFamily: fonts.mono,
-    color: colors.accent,
-    fontSize: 18,
-    fontWeight: 700,
-  },
-
   warningBanner: {
     width: "100%",
     maxWidth: 900,
@@ -975,83 +853,142 @@ const styles = {
     textAlign: "center",
   },
 
-  chatBox: {
+  qCard: {
     width: "100%",
-    maxWidth: 900,
-    height: 480,
+    maxWidth: 760,
     background: "rgba(255,255,255,0.04)",
-    borderRadius: radius.lg,
-    padding: "20px",
-    overflowY: "auto",
-    display: "flex",
-    flexDirection: "column",
-    gap: 14,
     backdropFilter: "blur(14px)",
     WebkitBackdropFilter: "blur(14px)",
     border: `1px solid ${colors.border}`,
+    borderRadius: radius.xl,
     boxShadow: shadows.card,
-  },
-
-  message: {
+    padding: "30px 34px 26px",
     display: "flex",
-    gap: 10,
-    maxWidth: "82%",
+    flexDirection: "column",
+    gap: 18,
   },
 
-  avatar: {
-    width: 34,
+  qCardHead: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+
+  qCounter: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontWeight: 600,
+  },
+
+  levelPill: {
+    padding: "4px 12px",
+    borderRadius: radius.pill,
+    fontSize: 11,
+    fontWeight: 700,
+    letterSpacing: "1px",
+    fontFamily: fonts.mono,
+    border: "1px solid transparent",
+  },
+
+  levelEasy: {
+    background: "rgba(34,197,94,0.12)",
+    borderColor: "rgba(74,222,128,0.45)",
+    color: "#4ade80",
+  },
+
+  levelMedium: {
+    background: "rgba(251,191,36,0.12)",
+    borderColor: "rgba(251,191,36,0.45)",
+    color: "#fbbf24",
+  },
+
+  levelHard: {
+    background: "rgba(248,113,113,0.12)",
+    borderColor: "rgba(248,113,113,0.45)",
+    color: "#f87171",
+  },
+
+  qText: {
+    color: colors.text,
+    fontSize: 21,
+    fontWeight: 600,
+    lineHeight: 1.55,
+    margin: 0,
+  },
+
+  optionsWrap: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+  },
+
+  optionBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: 14,
+    width: "100%",
+    textAlign: "left",
+    padding: "15px 18px",
+    borderRadius: radius.lg,
+    border: `1px solid ${colors.border}`,
+    background: "rgba(255,255,255,0.05)",
+    color: colors.text,
+    cursor: "pointer",
+    fontFamily: fonts.family,
+    transition:
+      "background 0.2s, border-color 0.2s, box-shadow 0.2s",
+  },
+
+  optionSelected: {
+    background: gradients.primary,
+    borderColor: "transparent",
+    boxShadow: shadows.glow,
+  },
+
+  optionLocked: {
+    opacity: 0.55,
+    cursor: "default",
+  },
+
+  optionLetter: {
+    minWidth: 34,
     height: 34,
     borderRadius: "50%",
+    border: `1px solid ${colors.border}`,
     background: "rgba(255,255,255,0.08)",
+    color: colors.accent,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    fontSize: 16,
+    fontSize: 14,
+    fontWeight: 700,
+    fontFamily: fonts.mono,
     flexShrink: 0,
+    transition: "background 0.2s, color 0.2s",
   },
 
-  bubble: {
-    padding: "12px 16px",
-    borderRadius: 16,
-    background: "#1e293b",
-    color: colors.text,
-    lineHeight: 1.6,
-    whiteSpace: "pre-wrap",
-    fontSize: 15,
-  },
-
-  inputContainer: {
-    width: "100%",
-    maxWidth: 900,
-    display: "flex",
-    gap: 10,
-    marginTop: 18,
-  },
-
-  input: {
-    flex: 1,
-    padding: "15px 18px",
-    borderRadius: radius.md,
-    border: `1px solid ${colors.border}`,
-    outline: "none",
-    fontSize: 16,
-    background: "rgba(255,255,255,0.06)",
-    color: colors.text,
-    fontFamily: fonts.family,
-    transition: "border-color 0.2s, box-shadow 0.2s",
-  },
-
-  sendButton: {
-    padding: "15px 26px",
-    borderRadius: radius.md,
-    border: "none",
-    background: gradients.primary,
+  optionLetterSelected: {
+    background: "rgba(255,255,255,0.22)",
+    borderColor: "transparent",
     color: "white",
-    fontSize: 16,
-    fontWeight: 600,
-    fontFamily: fonts.family,
-    cursor: "pointer",
-    boxShadow: shadows.glow,
+  },
+
+  optionText: {
+    fontSize: 15,
+    lineHeight: 1.5,
+  },
+
+  sendingRow: {
+    display: "flex",
+    justifyContent: "center",
+    paddingTop: 4,
+  },
+
+  endedWrap: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 14,
   },
 
   endedNote: {
